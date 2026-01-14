@@ -63,29 +63,38 @@ def train(num_episodes: int = 10000):
 
     model = load_or_create_model(MODEL_PATH, BOARD_SIZE)
     optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+    last_episode = 0
 
-    for episode in range(1, num_episodes + 1):
-        states, actions, rewards, score_diff = play_episode(model)
-        with tf.GradientTape() as tape:
-            logits = model(states, training=True)
-            ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=actions, logits=logits)
-            loss = tf.reduce_mean(ce * rewards)
+    try:
+        for episode in range(1, num_episodes + 1):
+            last_episode = episode
+            states, actions, rewards, score_diff = play_episode(model)
+            with tf.GradientTape() as tape:
+                logits = model(states, training=True)
+                ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=actions, logits=logits)
+                loss = tf.reduce_mean(ce * rewards)
 
-        grads = tape.gradient(loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+            grads = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-        if episode % SAVE_EVERY == 0:
-            model.save(MODEL_PATH)
-            checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{episode:06d}.keras")
-            model.save(checkpoint_path)
+            if episode % SAVE_EVERY == 0:
+                model.save(MODEL_PATH)
+                checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{episode:06d}.keras")
+                model.save(checkpoint_path)
 
-        if episode % 1 == 0:
             print(
                 f"episode={episode} loss={loss.numpy():.4f} score_diff={score_diff:.1f} "
                 f"moves={len(actions)}"
             )
 
-        time.sleep(0.01)
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        print("Interrupted: saving latest model...")
+    finally:
+        if last_episode > 0:
+            model.save(MODEL_PATH)
+            checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{last_episode:06d}.keras")
+            model.save(checkpoint_path)
 
 
 if __name__ == "__main__":
