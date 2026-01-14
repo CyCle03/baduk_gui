@@ -6,7 +6,7 @@ from typing import List, Tuple
 import numpy as np
 import tensorflow as tf
 
-from engine import GoBoard, BLACK, WHITE
+from engine import GoBoard, BLACK, WHITE, PASS_MOVE
 from rl_model import encode_board, index_to_move, legal_moves_mask, load_or_create_model
 
 BOARD_SIZE = 19
@@ -14,10 +14,36 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "latest.keras")
 CKPT_DIR = os.path.join(BASE_DIR, "checkpoints")
+SGF_DIR = os.path.join(BASE_DIR, "sgf")
 SAVE_EVERY = 10
 MAX_MOVES = 400
 KOMI = 6.5
 LEARNING_RATE = 1e-4
+
+
+def _sgf_coord(x: int, y: int) -> str:
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    return f"{letters[x]}{letters[y]}"
+
+
+def _save_sgf(moves: List[Tuple[int, Tuple[int, int]]], score_diff: float, episode: int):
+    os.makedirs(SGF_DIR, exist_ok=True)
+    result = f"B+{abs(score_diff):.1f}" if score_diff > 0 else f"W+{abs(score_diff):.1f}"
+    sgf_moves = []
+    for player, move in moves:
+        color = "B" if player == BLACK else "W"
+        if move == PASS_MOVE:
+            coord = ""
+        else:
+            coord = _sgf_coord(move[0], move[1])
+        sgf_moves.append(f";{color}[{coord}]")
+    header = f"(;GM[1]FF[4]SZ[{BOARD_SIZE}]KM[{KOMI}]RE[{result}]"
+    body = "".join(sgf_moves)
+    content = f"{header}{body})"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(SGF_DIR, f"selfplay_{episode:06d}_{timestamp}.sgf")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
 
 
 def sample_action(model: tf.keras.Model, board: GoBoard) -> int:
@@ -35,11 +61,12 @@ def sample_action(model: tf.keras.Model, board: GoBoard) -> int:
     return int(np.random.choice(len(probs), p=probs))
 
 
-def play_episode(model: tf.keras.Model) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+def play_episode(model: tf.keras.Model) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, List[Tuple[int, Tuple[int, int]]]]:
     board = GoBoard(BOARD_SIZE)
     states: List[np.ndarray] = []
     actions: List[int] = []
     players: List[int] = []
+    moves: List[Tuple[int, Tuple[int, int]]] = []
 
     move_count = 0
     while board.consecutive_passes < 2 and move_count < MAX_MOVES:
@@ -50,6 +77,7 @@ def play_episode(model: tf.keras.Model) -> Tuple[np.ndarray, np.ndarray, np.ndar
         players.append(board.to_play)
 
         move = index_to_move(action_idx, board.size)
+        moves.append((board.to_play, move))
         board.play(move[0], move[1])
         move_count += 1
 
@@ -57,7 +85,7 @@ def play_episode(model: tf.keras.Model) -> Tuple[np.ndarray, np.ndarray, np.ndar
     result = 1.0 if score_diff > 0 else -1.0
     rewards = np.array([result if p == BLACK else -result for p in players], dtype=np.float32)
     rewards -= np.mean(rewards)
-    return np.array(states, dtype=np.float32), np.array(actions, dtype=np.int32), rewards, score_diff
+    return np.array(states, dtype=np.float32), np.array(actions, dtype=np.int32), rewards, score_diff, moves
 
 
 def train(num_episodes: int = 10000):
@@ -79,7 +107,7 @@ def train(num_episodes: int = 10000):
         for episode in range(1, num_episodes + 1):
             episode_start = time.perf_counter()
             last_episode = episode
-            states, actions, rewards, score_diff = play_episode(model)
+            states, actions, rewards, score_diff, moves = play_episode(model)
             with tf.GradientTape() as tape:
                 logits = model(states, training=True)
                 ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=actions, logits=logits)
@@ -93,6 +121,7 @@ def train(num_episodes: int = 10000):
                 checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{episode:06d}.keras")
                 model.save(checkpoint_path)
                 manager.save(checkpoint_number=episode)
+                _save_sgf(moves, score_diff, episode)
 
             episode_time = time.perf_counter() - episode_start
             total_time = time.perf_counter() - start_time
