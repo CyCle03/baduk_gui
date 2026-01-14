@@ -217,8 +217,10 @@ class MainWindow(QWidget):
         self._train_process.readyReadStandardOutput.connect(self._on_train_output)
 
         self._model_reload_timer = QTimer(self)
-        self._model_reload_timer.setInterval(5000)
+        self._model_reload_timer.setInterval(10000)
         self._model_reload_timer.timeout.connect(self.on_reload_model)
+        # Always auto-reload to reflect external CLI training.
+        self._model_reload_timer.start()
         
 
     def _make_ai(self):
