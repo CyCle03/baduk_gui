@@ -13,6 +13,7 @@ BOARD_SIZE = 19
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "latest.keras")
+CKPT_DIR = os.path.join(BASE_DIR, "checkpoints")
 SAVE_EVERY = 10
 MAX_MOVES = 400
 KOMI = 6.5
@@ -64,6 +65,12 @@ def train(num_episodes: int = 10000):
 
     model = load_or_create_model(MODEL_PATH, BOARD_SIZE)
     optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+    # Build variables before restoring optimizer state.
+    _ = model(tf.zeros((1, BOARD_SIZE, BOARD_SIZE, 3)))
+    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+    manager = tf.train.CheckpointManager(checkpoint, CKPT_DIR, max_to_keep=3)
+    if manager.latest_checkpoint:
+        checkpoint.restore(manager.latest_checkpoint)
     last_episode = 0
 
     start_time = time.perf_counter()
@@ -85,6 +92,7 @@ def train(num_episodes: int = 10000):
                 model.save(MODEL_PATH)
                 checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{episode:06d}.keras")
                 model.save(checkpoint_path)
+                manager.save(checkpoint_number=episode)
 
             episode_time = time.perf_counter() - episode_start
             total_time = time.perf_counter() - start_time
@@ -107,6 +115,7 @@ def train(num_episodes: int = 10000):
             model.save(MODEL_PATH)
             checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{last_episode:06d}.keras")
             model.save(checkpoint_path)
+            manager.save(checkpoint_number=last_episode)
 
 
 if __name__ == "__main__":

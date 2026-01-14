@@ -37,6 +37,8 @@ The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 Models are saved to:
 - `models/latest.keras` (latest)
 - `models/checkpoint_XXXXXX.keras` (every N episodes)
+Optimizer checkpoints are saved to:
+- `checkpoints/` (TensorFlow checkpoint, auto-resume)
 
 Logs include per-episode time, total time, average time, and recent 10-episode average.
 
@@ -86,5 +88,7 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 모델 저장 위치:
 - `models/latest.keras` (최신)
 - `models/checkpoint_XXXXXX.keras` (N 에피소드마다)
+옵티마이저 체크포인트:
+- `checkpoints/` (TensorFlow 체크포인트, 재시작 시 이어짐)
 
 로그에는 판당 시간, 누적 시간, 평균 시간, 최근 10판 평균 시간이 포함됩니다.
