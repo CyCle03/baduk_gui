@@ -45,6 +45,17 @@ Optimizer checkpoints are saved to:
 - `checkpoints/` (TensorFlow checkpoint, auto-resume)
 
 Logs include per-episode time, total time, average time, and recent 10-episode average.
+Log fields:
+- `episode`: self-play game index
+- `loss`: total loss (policy + value)
+- `policy`: policy loss
+- `value`: value loss
+- `score_diff`: final score (black - white)
+- `moves`: number of moves (including passes)
+- `episode_time`: time for the episode
+- `total_time`: cumulative time
+- `avg_time`: average time per episode
+- `recent10_avg`: moving average of last 10 episodes
 
 ## Notes
 
@@ -100,3 +111,14 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `checkpoints/` (TensorFlow 체크포인트, 재시작 시 이어짐)
 
 로그에는 판당 시간, 누적 시간, 평균 시간, 최근 10판 평균 시간이 포함됩니다.
+로그 항목:
+- `episode`: 자가대국 판 번호
+- `loss`: 전체 손실(정책+가치)
+- `policy`: 정책 손실
+- `value`: 가치 손실
+- `score_diff`: 최종 점수(흑-백)
+- `moves`: 진행 수(패스 포함)
+- `episode_time`: 해당 판 소요 시간
+- `total_time`: 누적 시간
+- `avg_time`: 판당 평균 시간
+- `recent10_avg`: 최근 10판 평균
