@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 models/
+checkpoints/
 *.keras
 *.h5
 *.ckpt
