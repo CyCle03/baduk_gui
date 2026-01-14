@@ -99,6 +99,10 @@ class GoBoard:
         self._prev_pos_hash = prev_hash
         return True
 
+    def move_count(self) -> int:
+        # Number of moves played so far (excluding the initial snapshot).
+        return max(0, len(self._history) - 1)
+
     def get(self, x: int, y: int) -> int:
         return self.grid[y][x]
 
