@@ -7,7 +7,13 @@ import numpy as np
 import tensorflow as tf
 
 from engine import GoBoard, BLACK, WHITE, PASS_MOVE
-from rl_model import encode_board, index_to_move, legal_moves_mask, load_or_create_model
+from rl_model import (
+    encode_board,
+    index_to_move,
+    legal_moves_mask,
+    load_or_create_model,
+    move_to_index,
+)
 
 BOARD_SIZE = 19
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +25,10 @@ SAVE_EVERY = 10
 MAX_MOVES = 400
 KOMI = 6.5
 LEARNING_RATE = 1e-4
+PASS_START = 300
+VALUE_WINDOW = 20
+VALUE_DELTA = 0.05
+VALUE_MARGIN = 0.6
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -46,10 +56,12 @@ def _save_sgf(moves: List[Tuple[int, Tuple[int, int]]], score_diff: float, episo
         f.write(content)
 
 
-def sample_action(model: tf.keras.Model, board: GoBoard) -> int:
+def sample_action(model: tf.keras.Model, board: GoBoard) -> Tuple[int, float]:
     state = encode_board(board)
     mask = legal_moves_mask(board)
-    logits = model(state[None, ...], training=False).numpy()[0]
+    logits, value = model(state[None, ...], training=False)
+    logits = logits.numpy()[0]
+    value = float(value.numpy()[0][0])
     masked = np.where(mask > 0, logits, -1e9)
     exps = np.exp(masked - np.max(masked))
     probs = exps * mask
@@ -58,20 +70,36 @@ def sample_action(model: tf.keras.Model, board: GoBoard) -> int:
         probs = mask / np.sum(mask)
     else:
         probs = probs / total
-    return int(np.random.choice(len(probs), p=probs))
+    return int(np.random.choice(len(probs), p=probs)), value
 
 
-def play_episode(model: tf.keras.Model) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, List[Tuple[int, Tuple[int, int]]]]:
+def play_episode(
+    model: tf.keras.Model,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, List[Tuple[int, Tuple[int, int]]]]:
     board = GoBoard(BOARD_SIZE)
     states: List[np.ndarray] = []
     actions: List[int] = []
     players: List[int] = []
     moves: List[Tuple[int, Tuple[int, int]]] = []
+    recent_values: List[float] = []
 
     move_count = 0
     while board.consecutive_passes < 2 and move_count < MAX_MOVES:
         state = encode_board(board)
-        action_idx = sample_action(model, board)
+        action_idx, value = sample_action(model, board)
+        recent_values.append(value)
+        if len(recent_values) > VALUE_WINDOW:
+            recent_values.pop(0)
+
+        stable = (
+            move_count >= PASS_START
+            and len(recent_values) >= VALUE_WINDOW
+            and (max(recent_values) - min(recent_values) <= VALUE_DELTA)
+        )
+        should_pass = stable and abs(value) >= VALUE_MARGIN
+
+        if should_pass:
+            action_idx = move_to_index(PASS_MOVE, board.size)
         states.append(state)
         actions.append(action_idx)
         players.append(board.to_play)
@@ -83,9 +111,16 @@ def play_episode(model: tf.keras.Model) -> Tuple[np.ndarray, np.ndarray, np.ndar
 
     score_diff = board.score_area(komi=KOMI)
     result = 1.0 if score_diff > 0 else -1.0
-    rewards = np.array([result if p == BLACK else -result for p in players], dtype=np.float32)
-    rewards -= np.mean(rewards)
-    return np.array(states, dtype=np.float32), np.array(actions, dtype=np.int32), rewards, score_diff, moves
+    value_targets = np.array([result if p == BLACK else -result for p in players], dtype=np.float32)
+    rewards = value_targets - np.mean(value_targets)
+    return (
+        np.array(states, dtype=np.float32),
+        np.array(actions, dtype=np.int32),
+        rewards,
+        value_targets,
+        score_diff,
+        moves,
+    )
 
 
 def train(num_episodes: int = 10000):
@@ -107,11 +142,14 @@ def train(num_episodes: int = 10000):
         for episode in range(1, num_episodes + 1):
             episode_start = time.perf_counter()
             last_episode = episode
-            states, actions, rewards, score_diff, moves = play_episode(model)
+            states, actions, rewards, value_targets, score_diff, moves = play_episode(model)
             with tf.GradientTape() as tape:
-                logits = model(states, training=True)
+                logits, values = model(states, training=True)
                 ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=actions, logits=logits)
-                loss = tf.reduce_mean(ce * rewards)
+                policy_loss = tf.reduce_mean(ce * rewards)
+                values = tf.squeeze(values, axis=-1)
+                value_loss = tf.reduce_mean(tf.square(values - value_targets))
+                loss = policy_loss + 0.5 * value_loss
 
             grads = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
@@ -131,8 +169,9 @@ def train(num_episodes: int = 10000):
                 recent_times.pop(0)
             recent_avg = sum(recent_times) / len(recent_times)
             print(
-                f"episode={episode} loss={loss.numpy():.4f} score_diff={score_diff:.1f} "
-                f"moves={len(actions)} episode_time={episode_time:.2f}s total_time={total_time:.2f}s "
+                f"episode={episode} loss={loss.numpy():.4f} policy={policy_loss.numpy():.4f} "
+                f"value={value_loss.numpy():.4f} score_diff={score_diff:.1f} moves={len(actions)} "
+                f"episode_time={episode_time:.2f}s total_time={total_time:.2f}s "
                 f"avg_time={avg_time:.2f}s recent10_avg={recent_avg:.2f}s"
             )
 

@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from typing import List, Optional, Tuple
 
@@ -221,6 +222,7 @@ class MainWindow(QWidget):
         self.btn_sgf_next = QPushButton("SGF ▶")
         self.btn_sgf_exit = QPushButton("EXIT SGF")
         self.btn_sgf_play = QPushButton("SGF PLAY")
+        self.btn_sgf_stats = QPushButton("SGF STATS")
         self.sgf_speed = QSlider(Qt.Orientation.Horizontal)
         self.sgf_speed.setRange(100, 2000)
         self.sgf_speed.setValue(400)
@@ -241,6 +243,7 @@ class MainWindow(QWidget):
         self.btn_sgf_next.clicked.connect(self.on_sgf_next)
         self.btn_sgf_exit.clicked.connect(self.on_exit_sgf)
         self.btn_sgf_play.clicked.connect(self.on_toggle_sgf_play)
+        self.btn_sgf_stats.clicked.connect(self.on_sgf_stats)
         self.sgf_speed.valueChanged.connect(self.on_sgf_speed_changed)
 
         side = QVBoxLayout()
@@ -260,6 +263,7 @@ class MainWindow(QWidget):
         side.addWidget(self.btn_sgf_play)
         side.addWidget(QLabel("SGF Speed (ms)"))
         side.addWidget(self.sgf_speed)
+        side.addWidget(self.btn_sgf_stats)
         side.addWidget(self.btn_sgf_exit)
         side.addStretch(1)
 
@@ -540,6 +544,46 @@ class MainWindow(QWidget):
         self._update_sgf_controls()
         self._update_status()
         self.board_widget.update()
+
+    def on_sgf_stats(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        sgf_dir = os.path.join(base_dir, "sgf")
+        if not os.path.isdir(sgf_dir):
+            QMessageBox.information(self, "SGF 통계", "sgf 폴더가 없습니다.")
+            return
+        files = [f for f in os.listdir(sgf_dir) if f.lower().endswith(".sgf")]
+        if not files:
+            QMessageBox.information(self, "SGF 통계", "SGF 파일이 없습니다.")
+            return
+
+        re_result = re.compile(r"RE\\[([^\\]]+)\\]")
+        re_moves = re.compile(r";[BW]\\[")
+        b_wins = 0
+        w_wins = 0
+        total_moves = 0
+        for name in files:
+            path = os.path.join(sgf_dir, name)
+            try:
+                text = open(path, "r", encoding="utf-8").read()
+            except OSError:
+                continue
+            m = re_result.search(text)
+            result = m.group(1) if m else ""
+            if result.startswith("B+"):
+                b_wins += 1
+            elif result.startswith("W+"):
+                w_wins += 1
+            total_moves += len(re_moves.findall(text))
+
+        count = b_wins + w_wins if (b_wins + w_wins) > 0 else len(files)
+        avg_moves = total_moves / count if count > 0 else 0
+        QMessageBox.information(
+            self,
+            "SGF 통계",
+            f"총 {len(files)}판\\n"
+            f"흑 승: {b_wins} / 백 승: {w_wins}\\n"
+            f"평균 수: {avg_moves:.1f}",
+        )
 
     def _sgf_play_step(self):
         if not self.sgf_mode:

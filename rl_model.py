@@ -55,8 +55,9 @@ def build_policy_model(board_size: int) -> tf.keras.Model:
     x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(x)
     x = tf.keras.layers.Flatten()(x)
     x = tf.keras.layers.Dense(256, activation="relu")(x)
-    logits = tf.keras.layers.Dense(action_size(board_size))(x)
-    return tf.keras.Model(inputs, logits)
+    logits = tf.keras.layers.Dense(action_size(board_size), name="policy_logits")(x)
+    value = tf.keras.layers.Dense(1, activation="tanh", name="value")(x)
+    return tf.keras.Model(inputs, [logits, value])
 
 
 def masked_softmax(logits: np.ndarray, mask: np.ndarray, temperature: float) -> np.ndarray:
@@ -76,7 +77,11 @@ def masked_softmax(logits: np.ndarray, mask: np.ndarray, temperature: float) -> 
 
 def load_or_create_model(path: str, board_size: int) -> tf.keras.Model:
     if os.path.exists(path):
-        return tf.keras.models.load_model(path)
+        model = tf.keras.models.load_model(path)
+        if len(model.outputs) == 2:
+            return model
+        print("Loaded legacy policy-only model; creating new policy+value model.")
+        return build_policy_model(board_size)
     return build_policy_model(board_size)
 
 
@@ -93,7 +98,8 @@ class PolicyAI:
     def select_move(self, board: GoBoard) -> Tuple[int, int]:
         state = encode_board(board)
         mask = legal_moves_mask(board)
-        logits = self.model(state[None, ...], training=False).numpy()[0]
+        outputs = self.model(state[None, ...], training=False)
+        logits = outputs[0].numpy()[0]
         probs = masked_softmax(logits, mask, self.temperature)
         idx = int(np.random.choice(len(probs), p=probs))
         return index_to_move(idx, board.size)
