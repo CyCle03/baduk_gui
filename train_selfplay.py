@@ -1,3 +1,4 @@
+import argparse
 import os
 import time
 from typing import List, Tuple
@@ -98,4 +99,7 @@ def train(num_episodes: int = 10000):
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description="Self-play trainer")
+    parser.add_argument("--episodes", type=int, default=1000, help="number of self-play episodes")
+    args = parser.parse_args()
+    train(args.episodes)
