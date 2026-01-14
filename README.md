@@ -25,6 +25,10 @@ GUI controls:
 - `MODEL RELOAD`: reloads `models/latest.keras`
 - `AI vs AI`: toggles self-play viewing
 - `TRAIN (GUI)`: starts/stops background training
+- `LOAD SGF`: open SGF file and view moves
+- `SGF ◀ / SGF ▶`: step through moves
+- `SGF PLAY / PAUSE`: auto-play SGF
+- `SGF Speed (ms)`: adjust auto-play speed
 
 The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 
@@ -76,6 +80,10 @@ python3 -m venv .venv
 - `MODEL RELOAD`: `models/latest.keras` 다시 불러오기
 - `AI vs AI`: 자가대국 보기 토글
 - `TRAIN (GUI)`: GUI에서 학습 시작/중지
+- `LOAD SGF`: SGF 파일 열기 및 기보 보기
+- `SGF ◀ / SGF ▶`: 한 수씩 이동
+- `SGF PLAY / PAUSE`: 자동 재생
+- `SGF Speed (ms)`: 재생 속도 조절
 
 GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영합니다.
 

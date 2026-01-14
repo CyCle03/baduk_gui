@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QProcess
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QFontDatabase
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QMessageBox
+    QPushButton, QLabel, QMessageBox, QFileDialog, QSlider
 )
 
 from engine import (
@@ -150,6 +150,43 @@ class BoardWidget(QWidget):
                 painter.setPen(QPen(QColor(0, 80, 200), 2, Qt.PenStyle.DashLine))
                 painter.drawEllipse(p, stone_r, stone_r)
 
+def parse_sgf(path: str) -> Tuple[int, List[Tuple[int, Tuple[int, int]]]]:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    size = 19
+    size_idx = content.find("SZ[")
+    if size_idx != -1:
+        end = content.find("]", size_idx)
+        if end != -1:
+            try:
+                size = int(content[size_idx + 3 : end])
+            except ValueError:
+                raise ValueError("SGF 크기 파싱 실패")
+
+    moves: List[Tuple[int, Tuple[int, int]]] = []
+    i = 0
+    while i < len(content):
+        if content[i] == ";" and i + 3 < len(content) and content[i + 1] in ("B", "W"):
+            player = BLACK if content[i + 1] == "B" else WHITE
+            if content[i + 2] == "[":
+                end = content.find("]", i + 3)
+                if end == -1:
+                    break
+                coord = content[i + 3 : end]
+                if coord == "":
+                    move = PASS_MOVE
+                elif len(coord) >= 2:
+                    x = ord(coord[0]) - ord("a")
+                    y = ord(coord[1]) - ord("a")
+                    move = (x, y)
+                else:
+                    raise ValueError("SGF 좌표 파싱 실패")
+                moves.append((player, move))
+                i = end
+        i += 1
+    return size, moves
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -163,6 +200,9 @@ class MainWindow(QWidget):
         self.ai_vs_ai = False
         self.train_running = False
         self.last_train_status = "대기"
+        self.sgf_mode = False
+        self.sgf_moves: List[Tuple[int, Tuple[int, int]]] = []
+        self.sgf_index = 0
 
         self.status = QLabel()
         self.status.setFont(pick_korean_font(12))
@@ -176,8 +216,19 @@ class MainWindow(QWidget):
         self.btn_reload = QPushButton("MODEL RELOAD")
         self.btn_selfplay = QPushButton()
         self.btn_train = QPushButton()
+        self.btn_load_sgf = QPushButton("LOAD SGF")
+        self.btn_sgf_prev = QPushButton("SGF ◀")
+        self.btn_sgf_next = QPushButton("SGF ▶")
+        self.btn_sgf_exit = QPushButton("EXIT SGF")
+        self.btn_sgf_play = QPushButton("SGF PLAY")
+        self.sgf_speed = QSlider(Qt.Orientation.Horizontal)
+        self.sgf_speed.setRange(100, 2000)
+        self.sgf_speed.setValue(400)
+        self.sgf_speed.setSingleStep(50)
+        self.sgf_speed.setPageStep(100)
         self._update_selfplay_label()
         self._update_train_label()
+        self._update_sgf_controls()
 
         self.btn_pass.clicked.connect(self.on_pass)
         self.btn_undo.clicked.connect(self.on_undo_turn)
@@ -185,6 +236,12 @@ class MainWindow(QWidget):
         self.btn_reload.clicked.connect(self.on_reload_model)
         self.btn_selfplay.clicked.connect(self.on_toggle_selfplay)
         self.btn_train.clicked.connect(self.on_toggle_train)
+        self.btn_load_sgf.clicked.connect(self.on_load_sgf)
+        self.btn_sgf_prev.clicked.connect(self.on_sgf_prev)
+        self.btn_sgf_next.clicked.connect(self.on_sgf_next)
+        self.btn_sgf_exit.clicked.connect(self.on_exit_sgf)
+        self.btn_sgf_play.clicked.connect(self.on_toggle_sgf_play)
+        self.sgf_speed.valueChanged.connect(self.on_sgf_speed_changed)
 
         side = QVBoxLayout()
         side.addWidget(self.status)
@@ -196,6 +253,14 @@ class MainWindow(QWidget):
         side.addWidget(self.btn_reload)
         side.addWidget(self.btn_selfplay)
         side.addWidget(self.btn_train)
+        side.addSpacing(10)
+        side.addWidget(self.btn_load_sgf)
+        side.addWidget(self.btn_sgf_prev)
+        side.addWidget(self.btn_sgf_next)
+        side.addWidget(self.btn_sgf_play)
+        side.addWidget(QLabel("SGF Speed (ms)"))
+        side.addWidget(self.sgf_speed)
+        side.addWidget(self.btn_sgf_exit)
         side.addStretch(1)
 
         root = QHBoxLayout()
@@ -221,6 +286,10 @@ class MainWindow(QWidget):
         self._model_reload_timer.timeout.connect(self.on_reload_model)
         # Always auto-reload to reflect external CLI training.
         self._model_reload_timer.start()
+
+        self._sgf_play_timer = QTimer(self)
+        self._sgf_play_timer.setInterval(self.sgf_speed.value())
+        self._sgf_play_timer.timeout.connect(self._sgf_play_step)
         
 
     def _make_ai(self):
@@ -230,6 +299,9 @@ class MainWindow(QWidget):
     def _update_status(self):
         to_play = "흑(사람)" if self.board.to_play == BLACK else "백(AI)"
         train_state = "ON" if self.train_running else "OFF"
+        sgf_state = ""
+        if self.sgf_mode:
+            sgf_state = f"\nSGF: {self.sgf_index}/{len(self.sgf_moves)}"
         self.status.setText(
             f"차례: {to_play}\n"
             f"진행 수: {self.board.move_count()}\n"
@@ -237,6 +309,7 @@ class MainWindow(QWidget):
             f"학습 상태: {self.last_train_status}\n"
             f"포로(흑이 딴 수 / 백이 딴 수): {self.board.prisoners_black} / {self.board.prisoners_white}\n"
             f"연속 패스: {self.board.consecutive_passes}"
+            f"{sgf_state}"
         )
 
     def _update_selfplay_label(self):
@@ -246,6 +319,14 @@ class MainWindow(QWidget):
     def _update_train_label(self):
         state = "ON" if self.train_running else "OFF"
         self.btn_train.setText(f"TRAIN (GUI): {state}")
+
+    def _update_sgf_controls(self):
+        active = self.sgf_mode
+        self.btn_sgf_prev.setEnabled(active)
+        self.btn_sgf_next.setEnabled(active)
+        self.btn_sgf_exit.setEnabled(active)
+        self.btn_sgf_play.setEnabled(active)
+        self.sgf_speed.setEnabled(active)
 
     def _maybe_game_end(self):
         if self.board.consecutive_passes >= 2:
@@ -257,6 +338,8 @@ class MainWindow(QWidget):
 
     def on_human_move(self, x: int, y: int):
         # Human is always black in this MVP
+        if self.sgf_mode:
+            return
         if self.ai_vs_ai:
             return
         if self.board.to_play != BLACK:
@@ -275,6 +358,8 @@ class MainWindow(QWidget):
             self._ai_timer.start(50)
 
     def on_pass(self):
+        if self.sgf_mode:
+            return
         if self.ai_vs_ai:
             return
         if self.board.to_play != BLACK:
@@ -289,6 +374,8 @@ class MainWindow(QWidget):
 
     def _do_ai_move(self):
         if self.board.consecutive_passes >= 2:
+            return
+        if self.sgf_mode:
             return
         if self.board.to_play == BLACK and not self.ai_vs_ai:
             return
@@ -323,6 +410,8 @@ class MainWindow(QWidget):
         self.board_widget.update()
 
     def on_new_game(self):
+        if self.sgf_mode:
+            return
         self.board = GoBoard(19)
         self.board_widget.board = self.board
         self._update_status()
@@ -388,6 +477,91 @@ class MainWindow(QWidget):
             return
         self.last_train_status = lines[-1]
         self._update_status()
+
+    def on_load_sgf(self):
+        path, _ = QFileDialog.getOpenFileName(self, "SGF 열기", "", "SGF Files (*.sgf)")
+        if not path:
+            return
+        try:
+            size, moves = parse_sgf(path)
+        except ValueError as e:
+            QMessageBox.information(self, "SGF 오류", str(e))
+            return
+        if size != self.board.size:
+            QMessageBox.information(self, "SGF 크기 불일치", f"SGF 보드 크기 {size}는 지원하지 않습니다.")
+            return
+        self.sgf_mode = True
+        self.sgf_moves = moves
+        self.sgf_index = 0
+        self._apply_sgf_index()
+        self._update_sgf_controls()
+
+    def on_sgf_prev(self):
+        if not self.sgf_mode:
+            return
+        if self.sgf_index <= 0:
+            return
+        self.sgf_index -= 1
+        self._apply_sgf_index()
+
+    def on_sgf_next(self):
+        if not self.sgf_mode:
+            return
+        if self.sgf_index >= len(self.sgf_moves):
+            return
+        self.sgf_index += 1
+        self._apply_sgf_index()
+
+    def on_toggle_sgf_play(self):
+        if not self.sgf_mode:
+            return
+        if self._sgf_play_timer.isActive():
+            self._sgf_play_timer.stop()
+            self.btn_sgf_play.setText("SGF PLAY")
+            return
+        if self.sgf_index >= len(self.sgf_moves):
+            return
+        self._sgf_play_timer.start()
+        self.btn_sgf_play.setText("SGF PAUSE")
+
+    def on_sgf_speed_changed(self, value: int):
+        self._sgf_play_timer.setInterval(value)
+
+    def on_exit_sgf(self):
+        if not self.sgf_mode:
+            return
+        self._sgf_play_timer.stop()
+        self.btn_sgf_play.setText("SGF PLAY")
+        self.sgf_mode = False
+        self.sgf_moves = []
+        self.sgf_index = 0
+        self.board = GoBoard(19)
+        self.board_widget.board = self.board
+        self._update_sgf_controls()
+        self._update_status()
+        self.board_widget.update()
+
+    def _sgf_play_step(self):
+        if not self.sgf_mode:
+            return
+        if self.sgf_index >= len(self.sgf_moves):
+            self._sgf_play_timer.stop()
+            self.btn_sgf_play.setText("SGF PLAY")
+            return
+        self.sgf_index += 1
+        self._apply_sgf_index()
+
+    def _apply_sgf_index(self):
+        self.board = GoBoard(self.board.size)
+        for i in range(self.sgf_index):
+            player, move = self.sgf_moves[i]
+            # Ensure to_play matches SGF sequence.
+            if self.board.to_play != player:
+                self.board.to_play = player
+            self.board.play(move[0], move[1])
+        self.board_widget.board = self.board
+        self._update_status()
+        self.board_widget.update()
 
 def pick_korean_font(size: int) -> QFont:
     if sys.platform.startswith("win"):
