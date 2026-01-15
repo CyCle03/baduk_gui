@@ -21,6 +21,8 @@ from engine import (
     EMPTY,
     PASS_MOVE,
     in_bounds,
+    neighbors,
+    opponent,
 )
 
 try:
@@ -219,6 +221,95 @@ def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if total <= 0:
         return mask / np.sum(mask)
     return probs / total
+
+
+def _score_area_with_dead(board: GoBoard, komi: float) -> Tuple[float, int, int]:
+    size = board.size
+    territory_owner: Dict[Tuple[int, int], int] = {}
+    visited = set()
+    black_territory = 0
+    white_territory = 0
+
+    for y in range(size):
+        for x in range(size):
+            if board.get(x, y) != EMPTY:
+                continue
+            if (x, y) in visited:
+                continue
+            region = []
+            bordering = set()
+            stack = [(x, y)]
+            while stack:
+                cx, cy = stack.pop()
+                if (cx, cy) in visited:
+                    continue
+                visited.add((cx, cy))
+                region.append((cx, cy))
+                for nx, ny in neighbors(size, cx, cy):
+                    nv = board.get(nx, ny)
+                    if nv == EMPTY:
+                        if (nx, ny) not in visited:
+                            stack.append((nx, ny))
+                    else:
+                        bordering.add(nv)
+            owner = EMPTY
+            if bordering == {BLACK}:
+                owner = BLACK
+                black_territory += len(region)
+            elif bordering == {WHITE}:
+                owner = WHITE
+                white_territory += len(region)
+            for pos in region:
+                territory_owner[pos] = owner
+
+    stone_visited = set()
+    black_stones = 0
+    white_stones = 0
+    black_dead = 0
+    white_dead = 0
+
+    for y in range(size):
+        for x in range(size):
+            color = board.get(x, y)
+            if color == EMPTY or (x, y) in stone_visited:
+                continue
+            group = []
+            stack = [(x, y)]
+            stone_visited.add((x, y))
+            while stack:
+                cx, cy = stack.pop()
+                group.append((cx, cy))
+                for nx, ny in neighbors(size, cx, cy):
+                    if board.get(nx, ny) == color and (nx, ny) not in stone_visited:
+                        stone_visited.add((nx, ny))
+                        stack.append((nx, ny))
+
+            opp = opponent(color)
+            dead = True
+            for gx, gy in group:
+                for nx, ny in neighbors(size, gx, gy):
+                    if board.get(nx, ny) != EMPTY:
+                        continue
+                    owner = territory_owner.get((nx, ny), EMPTY)
+                    if owner != opp:
+                        dead = False
+                        break
+                if not dead:
+                    break
+            if dead:
+                if color == BLACK:
+                    black_dead += len(group)
+                else:
+                    white_dead += len(group)
+            else:
+                if color == BLACK:
+                    black_stones += len(group)
+                else:
+                    white_stones += len(group)
+
+    black_score = black_stones + black_territory + white_dead
+    white_score = white_stones + white_territory + black_dead + komi
+    return black_score - white_score, black_dead, white_dead
 
 
 def _apply_temperature(probs: np.ndarray, temperature: float) -> np.ndarray:
@@ -593,16 +684,18 @@ class MainWindow(QWidget):
         is_pass_end = self.board.consecutive_passes >= 2
         is_move_end = self.board.move_count() >= GUI_MAX_MOVES
         if (is_pass_end or is_move_end) and not self.game_over_shown:
-            score_diff = self.board.score_area(komi=GUI_KOMI)
+            score_diff, black_dead, white_dead = _score_area_with_dead(self.board, GUI_KOMI)
             winner = "흑" if score_diff > 0 else "백"
             result = f"{winner} 승 ({abs(score_diff):.1f}점 차)"
             reason = "연속 2패스" if is_pass_end else f"{GUI_MAX_MOVES}수 도달"
+            dead_info = f"사석(추정): 흑 {black_dead} / 백 {white_dead}"
             self.game_over_shown = True
             QMessageBox.information(
                 self, "게임 종료(임시)",
                 f"{reason}. (MVP) 여기서 종료로 간주합니다.\n"
                 f"계가 결과: {result} (코미 {GUI_KOMI})\n"
-                "사석 마킹 없이 자동 계산한 임시 결과입니다."
+                f"{dead_info}\n"
+                "사석 추정 포함 자동 계산입니다."
             )
 
     def on_human_move(self, x: int, y: int):
