@@ -7,3 +7,5 @@ checkpoints/
 sgf/
 *.h5
 *.ckpt
+data/
+*.npz
