@@ -25,6 +25,8 @@ GUI controls:
 - `MODEL RELOAD`: reloads `models/latest.keras`
 - `AI vs AI`: toggles self-play viewing
 - `TRAIN (GUI)`: starts/stops background training
+- `MCTS (AI)`: toggles MCTS move selection (PolicyAI only)
+- `MCTS Sims`: number of MCTS simulations per move
 - `LOAD SGF`: open SGF file and view moves
 - `SGF ◀ / SGF ▶`: step through moves
 - `SGF PLAY / PAUSE`: auto-play SGF
@@ -100,6 +102,8 @@ python3 -m venv .venv
 - `MODEL RELOAD`: `models/latest.keras` 다시 불러오기
 - `AI vs AI`: 자가대국 보기 토글
 - `TRAIN (GUI)`: GUI에서 학습 시작/중지
+- `MCTS (AI)`: MCTS 수 선택 토글(PolicyAI 필요)
+- `MCTS Sims`: 수당 MCTS 시뮬레이션 수
 - `LOAD SGF`: SGF 파일 열기 및 기보 보기
 - `SGF ◀ / SGF ▶`: 한 수씩 이동
 - `SGF PLAY / PAUSE`: 자동 재생

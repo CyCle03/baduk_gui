@@ -1,8 +1,10 @@
+import math
 import os
 import re
 import sys
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QProcess
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QFontDatabase
 from PyQt6.QtWidgets import (
@@ -22,9 +24,15 @@ from engine import (
 )
 
 try:
-    from rl_model import PolicyAI
+    from rl_model import PolicyAI, encode_board, index_to_move, legal_moves_mask
 except Exception:
     PolicyAI = None
+    encode_board = None
+    index_to_move = None
+    legal_moves_mask = None
+
+GUI_KOMI = 6.5
+GUI_MAX_MOVES = 400
 
 # ----------------------------
 # GUI (PyQt6)
@@ -188,6 +196,122 @@ def parse_sgf(path: str) -> Tuple[int, List[Tuple[int, Tuple[int, int]]]]:
     return size, moves
 
 
+def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    masked = np.where(mask > 0, logits, -1e9)
+    exps = np.exp(masked - np.max(masked))
+    probs = exps * mask
+    total = np.sum(probs)
+    if total <= 0:
+        return mask / np.sum(mask)
+    return probs / total
+
+
+def _clone_board(board: GoBoard) -> GoBoard:
+    new_board = GoBoard(board.size)
+    new_board.grid = [row[:] for row in board.grid]
+    new_board.to_play = board.to_play
+    new_board.consecutive_passes = board.consecutive_passes
+    new_board.prisoners_black = board.prisoners_black
+    new_board.prisoners_white = board.prisoners_white
+    new_board._prev_pos_hash = board._prev_pos_hash
+    new_board._history = [
+        (
+            new_board.copy_grid(),
+            new_board.to_play,
+            new_board.consecutive_passes,
+            new_board.prisoners_black,
+            new_board.prisoners_white,
+            new_board._prev_pos_hash,
+        )
+    ]
+    return new_board
+
+
+class _MCTSNode:
+    def __init__(self, prior: float):
+        self.prior = float(prior)
+        self.visit_count = 0
+        self.value_sum = 0.0
+        self.children: Dict[int, "_MCTSNode"] = {}
+
+    def value(self) -> float:
+        if self.visit_count == 0:
+            return 0.0
+        return self.value_sum / self.visit_count
+
+
+def _select_child(node: _MCTSNode, cpuct: float) -> Tuple[int, _MCTSNode]:
+    total_visits = sum(child.visit_count for child in node.children.values())
+    best_score = -1e9
+    best_action = 0
+    best_child = None
+    for action_idx, child in node.children.items():
+        q = child.value()
+        u = cpuct * child.prior * math.sqrt(total_visits + 1) / (1 + child.visit_count)
+        score = q + u
+        if score > best_score:
+            best_score = score
+            best_action = action_idx
+            best_child = child
+    if best_child is None:
+        raise RuntimeError("MCTS selection failed")
+    return best_action, best_child
+
+
+def _terminal_value(board: GoBoard, komi: float, max_moves: int) -> Optional[float]:
+    if board.consecutive_passes >= 2 or board.move_count() >= max_moves:
+        score_diff = board.score_area(komi=komi)
+        result_black = 1.0 if score_diff > 0 else -1.0
+        return result_black if board.to_play == BLACK else -result_black
+    return None
+
+
+def _expand_node(model, node: _MCTSNode, board: GoBoard) -> float:
+    if encode_board is None or legal_moves_mask is None:
+        raise RuntimeError("rl_model helpers not available")
+    state = encode_board(board)
+    mask = legal_moves_mask(board)
+    logits, value = model(state[None, ...], training=False)
+    logits = logits.numpy()[0]
+    value = float(value.numpy()[0][0])
+    probs = _masked_softmax(logits, mask)
+    for idx, p in enumerate(probs):
+        if mask[idx] > 0:
+            node.children[idx] = _MCTSNode(p)
+    return value
+
+
+def _mcts_pick_move(model, board: GoBoard, num_simulations: int, cpuct: float) -> Tuple[int, int]:
+    if index_to_move is None:
+        raise RuntimeError("rl_model helpers not available")
+    root = _MCTSNode(1.0)
+    _expand_node(model, root, board)
+
+    for _ in range(num_simulations):
+        node = root
+        sim_board = _clone_board(board)
+        path = [node]
+        while node.children:
+            action_idx, node = _select_child(node, cpuct)
+            move = index_to_move(action_idx, sim_board.size)
+            sim_board.play(move[0], move[1])
+            path.append(node)
+
+        terminal = _terminal_value(sim_board, GUI_KOMI, GUI_MAX_MOVES)
+        if terminal is None:
+            value = _expand_node(model, node, sim_board)
+        else:
+            value = terminal
+
+        for n in reversed(path):
+            n.visit_count += 1
+            n.value_sum += value
+            value = -value
+
+    best_action = max(root.children.items(), key=lambda kv: kv[1].visit_count)[0]
+    return index_to_move(best_action, board.size)
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -199,6 +323,9 @@ class MainWindow(QWidget):
         self.train_script = os.path.join(base_dir, "train_selfplay.py")
         self.ai = self._make_ai()
         self.ai_vs_ai = False
+        self.use_mcts = False
+        self.mcts_simulations = 50
+        self.mcts_cpuct = 1.5
         self.train_running = False
         self.last_train_status = "대기"
         self.model_status = "대기"
@@ -218,6 +345,12 @@ class MainWindow(QWidget):
         self.btn_reload = QPushButton("MODEL RELOAD")
         self.btn_selfplay = QPushButton()
         self.btn_train = QPushButton()
+        self.btn_mcts = QPushButton()
+        self.mcts_sims = QSlider(Qt.Orientation.Horizontal)
+        self.mcts_sims.setRange(10, 200)
+        self.mcts_sims.setValue(self.mcts_simulations)
+        self.mcts_sims.setSingleStep(10)
+        self.mcts_sims.setPageStep(10)
         self.btn_load_sgf = QPushButton("LOAD SGF")
         self.btn_sgf_prev = QPushButton("SGF ◀")
         self.btn_sgf_next = QPushButton("SGF ▶")
@@ -231,6 +364,7 @@ class MainWindow(QWidget):
         self.sgf_speed.setPageStep(100)
         self._update_selfplay_label()
         self._update_train_label()
+        self._update_mcts_label()
         self._update_sgf_controls()
 
         self.btn_pass.clicked.connect(self.on_pass)
@@ -239,6 +373,8 @@ class MainWindow(QWidget):
         self.btn_reload.clicked.connect(self.on_reload_model)
         self.btn_selfplay.clicked.connect(self.on_toggle_selfplay)
         self.btn_train.clicked.connect(self.on_toggle_train)
+        self.btn_mcts.clicked.connect(self.on_toggle_mcts)
+        self.mcts_sims.valueChanged.connect(self.on_mcts_sims_changed)
         self.btn_load_sgf.clicked.connect(self.on_load_sgf)
         self.btn_sgf_prev.clicked.connect(self.on_sgf_prev)
         self.btn_sgf_next.clicked.connect(self.on_sgf_next)
@@ -257,6 +393,9 @@ class MainWindow(QWidget):
         side.addWidget(self.btn_reload)
         side.addWidget(self.btn_selfplay)
         side.addWidget(self.btn_train)
+        side.addWidget(self.btn_mcts)
+        side.addWidget(QLabel("MCTS Sims"))
+        side.addWidget(self.mcts_sims)
         side.addSpacing(10)
         side.addWidget(self.btn_load_sgf)
         side.addWidget(self.btn_sgf_prev)
@@ -304,6 +443,7 @@ class MainWindow(QWidget):
     def _update_status(self):
         to_play = "흑(사람)" if self.board.to_play == BLACK else "백(AI)"
         train_state = "ON" if self.train_running else "OFF"
+        mcts_state = f"ON ({self.mcts_simulations})" if self.use_mcts else "OFF"
         sgf_state = ""
         if self.sgf_mode:
             sgf_state = f"\nSGF: {self.sgf_index}/{len(self.sgf_moves)}"
@@ -312,6 +452,7 @@ class MainWindow(QWidget):
             f"진행 수: {self.board.move_count()}\n"
             f"학습: {train_state}\n"
             f"학습 상태: {self.last_train_status}\n"
+            f"MCTS: {mcts_state}\n"
             f"모델: {self.model_status}\n"
             f"포로(흑이 딴 수 / 백이 딴 수): {self.board.prisoners_black} / {self.board.prisoners_white}\n"
             f"연속 패스: {self.board.consecutive_passes}"
@@ -325,6 +466,10 @@ class MainWindow(QWidget):
     def _update_train_label(self):
         state = "ON" if self.train_running else "OFF"
         self.btn_train.setText(f"TRAIN (GUI): {state}")
+
+    def _update_mcts_label(self):
+        state = "ON" if self.use_mcts else "OFF"
+        self.btn_mcts.setText(f"MCTS (AI): {state}")
 
     def _update_sgf_controls(self):
         active = self.sgf_mode
@@ -385,7 +530,18 @@ class MainWindow(QWidget):
             return
         if self.board.to_play == BLACK and not self.ai_vs_ai:
             return
-        mv = self.ai.select_move(self.board)
+        if self.use_mcts and isinstance(self.ai, PolicyAI):
+            try:
+                mv = _mcts_pick_move(
+                    self.ai.model,
+                    self.board,
+                    self.mcts_simulations,
+                    self.mcts_cpuct,
+                )
+            except Exception:
+                mv = self.ai.select_move(self.board)
+        else:
+            mv = self.ai.select_move(self.board)
         self.board.play(mv[0], mv[1])
         self._update_status()
         self.board_widget.update()
@@ -473,6 +629,31 @@ class MainWindow(QWidget):
         self.last_train_status = "시작됨"
         self._model_reload_timer.start()
         self._update_train_label()
+        self._update_status()
+
+    def on_toggle_mcts(self):
+        if self.use_mcts:
+            self.use_mcts = False
+            self._update_mcts_label()
+            self._update_status()
+            return
+        if PolicyAI is None:
+            QMessageBox.information(self, "MCTS 불가", "TensorFlow를 사용할 수 없습니다.")
+            return
+        if not os.path.exists(self.model_path):
+            QMessageBox.information(self, "MCTS 불가", "models/latest.keras 파일이 없습니다.")
+            return
+        if not isinstance(self.ai, PolicyAI):
+            self.ai = self._make_ai()
+        if not isinstance(self.ai, PolicyAI):
+            QMessageBox.information(self, "MCTS 불가", "정책 모델을 로드하지 못했습니다.")
+            return
+        self.use_mcts = True
+        self._update_mcts_label()
+        self._update_status()
+
+    def on_mcts_sims_changed(self, value: int):
+        self.mcts_simulations = value
         self._update_status()
 
     def _on_train_finished(self):
