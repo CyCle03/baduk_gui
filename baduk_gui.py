@@ -32,7 +32,7 @@ except Exception:
     legal_moves_mask = None
 
 GUI_KOMI = 6.5
-GUI_MAX_MOVES = 400
+GUI_MAX_MOVES = 300
 
 # ----------------------------
 # GUI (PyQt6)

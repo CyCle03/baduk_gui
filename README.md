@@ -45,6 +45,8 @@ Optional flags:
 - `--komi 6.5`
 - `--save-every 10`
 - `--sleep 0.0`
+- `--mcts-sims 0`
+- `--mcts-cpuct 1.5`
 
 Models are saved to:
 - `models/latest.keras` (latest)
@@ -71,6 +73,7 @@ Total episode counter:
 ## Notes
 
 - Training is CPU-only unless TensorFlow detects a GPU.
+- Default max moves per game is 300.
 - Model files are ignored by git (`models/`, `*.keras`).
 
 ---
@@ -122,6 +125,8 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `--komi 6.5`
 - `--save-every 10`
 - `--sleep 0.0` (에피소드 간 대기 시간, 0이면 없음)
+- `--mcts-sims 0`
+- `--mcts-cpuct 1.5`
 
 모델 저장 위치:
 - `models/latest.keras` (최신)
@@ -141,6 +146,8 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `total_time`: 누적 시간
 - `avg_time`: 판당 평균 시간
 - `recent10_avg`: 최근 10판 평균
+
+기본 최대 수: 300
 
 누적 판수:
 - `train_state.json`에 전체 `total_episodes`가 누적 저장됩니다.
