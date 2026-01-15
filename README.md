@@ -32,6 +32,14 @@ GUI controls:
 - `SGF PLAY / PAUSE`: auto-play SGF
 - `SGF Speed (ms)`: adjust auto-play speed
 
+Game end conditions (GUI):
+- Two consecutive passes
+- 300 moves reached (`GUI_MAX_MOVES`)
+
+AI pass behavior (GUI):
+- After the opponent passes, the AI will pass to end the game when its win
+  probability is high enough (default threshold: `0.7`).
+
 The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 
 ## Train (CLI)
@@ -57,8 +65,6 @@ Optional flags:
 - `--train-only`
 - `--save-selfplay`
 - `--max-data-files 0`
-- `--progress` / `--no-progress`
-- `--progress` / `--no-progress`
 - `--progress` / `--no-progress`
 
 Models are saved to:
@@ -175,6 +181,14 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `total_time`: 누적 시간
 - `avg_time`: 판당 평균 시간
 - `recent10_avg`: 최근 10판 평균
+
+GUI 종료 조건:
+- 연속 2패스
+- 300수 도달(`GUI_MAX_MOVES`)
+
+AI 패스 동작(GUI):
+- 상대가 패스한 직후, 승리 확률이 충분히 높으면 패스해서 바로 종료합니다
+  (기본 임계값: `0.7`).
 
 기본 최대 수: 300
 

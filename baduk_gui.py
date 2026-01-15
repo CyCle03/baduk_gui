@@ -33,6 +33,7 @@ except Exception:
 
 GUI_KOMI = 6.5
 GUI_MAX_MOVES = 300
+GUI_PASS_WIN_THRESHOLD = 0.7
 
 # ----------------------------
 # GUI (PyQt6)
@@ -322,6 +323,17 @@ def _mcts_pick_move(model, board: GoBoard, num_simulations: int, cpuct: float) -
     return index_to_move(best_action, board.size)
 
 
+def _estimate_win_prob(model, board: GoBoard) -> Optional[float]:
+    if encode_board is None:
+        return None
+    state = encode_board(board)
+    outputs = model(state[None, ...], training=False)
+    if not isinstance(outputs, (list, tuple)) or len(outputs) < 2:
+        return None
+    value = float(outputs[1].numpy()[0][0])
+    return 0.5 * (value + 1.0)
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -493,15 +505,33 @@ class MainWindow(QWidget):
         self.btn_sgf_play.setEnabled(active)
         self.sgf_speed.setEnabled(active)
 
+    def _should_pass_after_opponent(self) -> bool:
+        if self.board.consecutive_passes != 1:
+            return False
+        if PolicyAI is None:
+            return False
+        if not isinstance(self.ai, PolicyAI):
+            return False
+        try:
+            win_prob = _estimate_win_prob(self.ai.model, self.board)
+        except Exception:
+            return False
+        if win_prob is None:
+            return False
+        return win_prob >= GUI_PASS_WIN_THRESHOLD
+
     def _maybe_game_end(self):
-        if self.board.consecutive_passes >= 2 and not self.game_over_shown:
+        is_pass_end = self.board.consecutive_passes >= 2
+        is_move_end = self.board.move_count() >= GUI_MAX_MOVES
+        if (is_pass_end or is_move_end) and not self.game_over_shown:
             score_diff = self.board.score_area(komi=GUI_KOMI)
             winner = "흑" if score_diff > 0 else "백"
             result = f"{winner} 승 ({abs(score_diff):.1f}점 차)"
+            reason = "연속 2패스" if is_pass_end else f"{GUI_MAX_MOVES}수 도달"
             self.game_over_shown = True
             QMessageBox.information(
                 self, "게임 종료(임시)",
-                "연속 2패스. (MVP) 여기서 종료로 간주합니다.\n"
+                f"{reason}. (MVP) 여기서 종료로 간주합니다.\n"
                 f"계가 결과: {result} (코미 {GUI_KOMI})\n"
                 "사석 마킹 없이 자동 계산한 임시 결과입니다."
             )
@@ -528,7 +558,7 @@ class MainWindow(QWidget):
         self._maybe_game_end()
 
         # If game not ended, let AI play
-        if self.board.consecutive_passes < 2:
+        if self.board.consecutive_passes < 2 and self.board.move_count() < GUI_MAX_MOVES:
             self._ai_timer.start(50)
 
     def on_pass(self):
@@ -547,17 +577,19 @@ class MainWindow(QWidget):
         self.board_widget.update()
         self._maybe_game_end()
 
-        if self.board.consecutive_passes < 2:
+        if self.board.consecutive_passes < 2 and self.board.move_count() < GUI_MAX_MOVES:
             self._ai_timer.start(50)
 
     def _do_ai_move(self):
-        if self.board.consecutive_passes >= 2:
+        if self.board.consecutive_passes >= 2 or self.board.move_count() >= GUI_MAX_MOVES:
             return
         if self.sgf_mode:
             return
         if self.board.to_play == BLACK and not self.ai_vs_ai:
             return
-        if self.use_mcts and isinstance(self.ai, PolicyAI):
+        if self._should_pass_after_opponent():
+            mv = PASS_MOVE
+        elif self.use_mcts and isinstance(self.ai, PolicyAI):
             try:
                 mv = _mcts_pick_move(
                     self.ai.model,
@@ -577,7 +609,11 @@ class MainWindow(QWidget):
         self._update_status()
         self.board_widget.update()
         self._maybe_game_end()
-        if self.board.consecutive_passes < 2 and (self.ai_vs_ai or self.board.to_play == WHITE):
+        if (
+            self.board.consecutive_passes < 2
+            and self.board.move_count() < GUI_MAX_MOVES
+            and (self.ai_vs_ai or self.board.to_play == WHITE)
+        ):
             self._ai_timer.start(50)
 
     def on_undo_turn(self):
@@ -615,6 +651,8 @@ class MainWindow(QWidget):
         self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
+        if self.ai_vs_ai:
+            self._ai_timer.start(50)
 
     def on_reload_model(self):
         if PolicyAI is None:
@@ -637,7 +675,11 @@ class MainWindow(QWidget):
     def on_toggle_selfplay(self):
         self.ai_vs_ai = not self.ai_vs_ai
         self._update_selfplay_label()
-        if self.ai_vs_ai and self.board.consecutive_passes < 2:
+        if (
+            self.ai_vs_ai
+            and self.board.consecutive_passes < 2
+            and self.board.move_count() < GUI_MAX_MOVES
+        ):
             self._ai_timer.start(50)
 
     def on_toggle_train(self):
