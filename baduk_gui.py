@@ -48,6 +48,7 @@ class BoardWidget(QWidget):
         self.star_points = self._star_points(board.size)
 
         self.hover_xy: Optional[Tuple[int, int]] = None
+        self.last_move: Optional[Tuple[int, int]] = None
         self.setMouseTracking(True)
 
     def _star_points(self, n: int) -> List[Tuple[int, int]]:
@@ -149,6 +150,15 @@ class BoardWidget(QWidget):
                     painter.setBrush(QBrush(QColor(245, 245, 245)))
                     painter.setPen(QPen(QColor(160, 160, 160), 1))
                 painter.drawEllipse(p, stone_r, stone_r)
+
+        # last move highlight
+        if self.last_move is not None:
+            lx, ly = self.last_move
+            if in_bounds(self.board.size, lx, ly) and self.board.get(lx, ly) != EMPTY:
+                p = self._xy_to_point(lx, ly)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(220, 60, 60), 2))
+                painter.drawEllipse(p, stone_r * 0.6, stone_r * 0.6)
 
         # hover hint
         if self.hover_xy is not None:
@@ -327,6 +337,7 @@ class MainWindow(QWidget):
         self.mcts_simulations = 50
         self.mcts_cpuct = 1.5
         self.train_running = False
+        self.game_over_shown = False
         self.last_train_status = "대기"
         self.model_status = "대기"
         self.sgf_mode = False
@@ -335,9 +346,12 @@ class MainWindow(QWidget):
 
         self.status = QLabel()
         self.status.setFont(pick_korean_font(12))
+        self.status.setWordWrap(True)
+        self.status.setMinimumWidth(260)
         self._update_status()
 
         self.board_widget = BoardWidget(self.board, self.on_human_move)
+        self.last_move: Optional[Tuple[int, int]] = None
 
         self.btn_pass = QPushButton("PASS (흑)")
         self.btn_undo = QPushButton("UNDO (한 턴)")
@@ -480,11 +494,16 @@ class MainWindow(QWidget):
         self.sgf_speed.setEnabled(active)
 
     def _maybe_game_end(self):
-        if self.board.consecutive_passes >= 2:
+        if self.board.consecutive_passes >= 2 and not self.game_over_shown:
+            score_diff = self.board.score_area(komi=GUI_KOMI)
+            winner = "흑" if score_diff > 0 else "백"
+            result = f"{winner} 승 ({abs(score_diff):.1f}점 차)"
+            self.game_over_shown = True
             QMessageBox.information(
                 self, "게임 종료(임시)",
                 "연속 2패스. (MVP) 여기서 종료로 간주합니다.\n"
-                "계가(사석 마킹)는 다음 단계에서 추가하는 걸 추천해요."
+                f"계가 결과: {result} (코미 {GUI_KOMI})\n"
+                "사석 마킹 없이 자동 계산한 임시 결과입니다."
             )
 
     def on_human_move(self, x: int, y: int):
@@ -500,6 +519,10 @@ class MainWindow(QWidget):
         except IllegalMove:
             return
 
+        self.last_move = (x, y)
+        self.board_widget.last_move = self.last_move
+        if self.board.consecutive_passes < 2:
+            self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
         self._maybe_game_end()
@@ -516,6 +539,10 @@ class MainWindow(QWidget):
         if self.board.to_play != BLACK:
             return
         self.board.play(*PASS_MOVE)
+        self.last_move = None
+        self.board_widget.last_move = None
+        if self.board.consecutive_passes < 2:
+            self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
         self._maybe_game_end()
@@ -543,6 +570,10 @@ class MainWindow(QWidget):
         else:
             mv = self.ai.select_move(self.board)
         self.board.play(mv[0], mv[1])
+        self.last_move = None if mv == PASS_MOVE else (mv[0], mv[1])
+        self.board_widget.last_move = self.last_move
+        if self.board.consecutive_passes < 2:
+            self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
         self._maybe_game_end()
@@ -568,6 +599,9 @@ class MainWindow(QWidget):
         if not undone_any:
             return
 
+        self.last_move = None
+        self.board_widget.last_move = None
+        self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
 
@@ -576,6 +610,9 @@ class MainWindow(QWidget):
             return
         self.board = GoBoard(19)
         self.board_widget.board = self.board
+        self.last_move = None
+        self.board_widget.last_move = None
+        self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
 
@@ -731,6 +768,9 @@ class MainWindow(QWidget):
         self.sgf_index = 0
         self.board = GoBoard(19)
         self.board_widget.board = self.board
+        self.last_move = None
+        self.board_widget.last_move = None
+        self.game_over_shown = False
         self._update_sgf_controls()
         self._update_status()
         self.board_widget.update()
@@ -807,11 +847,21 @@ class MainWindow(QWidget):
                 self.sgf_index = 0
                 self.board = GoBoard(19)
                 self.board_widget.board = self.board
+                self.last_move = None
+                self.board_widget.last_move = None
+                self.game_over_shown = False
                 self._update_sgf_controls()
                 self._update_status()
                 self.board_widget.update()
                 return
         self.board_widget.board = self.board
+        if self.sgf_index > 0:
+            _, move = self.sgf_moves[self.sgf_index - 1]
+            self.last_move = None if move == PASS_MOVE else move
+        else:
+            self.last_move = None
+        self.board_widget.last_move = self.last_move
+        self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
 
