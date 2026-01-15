@@ -1,9 +1,10 @@
 import argparse
 import json
+import math
 import os
 import shutil
 import time
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -99,20 +100,141 @@ def _backup_train_state(src_path: str, backup_path: str) -> None:
         pass
 
 
+def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    masked = np.where(mask > 0, logits, -1e9)
+    exps = np.exp(masked - np.max(masked))
+    probs = exps * mask
+    total = np.sum(probs)
+    if total <= 0:
+        return mask / np.sum(mask)
+    return probs / total
+
+
+def _clone_board(board: GoBoard) -> GoBoard:
+    new_board = GoBoard(board.size)
+    new_board.grid = [row[:] for row in board.grid]
+    new_board.to_play = board.to_play
+    new_board.consecutive_passes = board.consecutive_passes
+    new_board.prisoners_black = board.prisoners_black
+    new_board.prisoners_white = board.prisoners_white
+    new_board._prev_pos_hash = board._prev_pos_hash
+    new_board._history = [
+        (
+            new_board.copy_grid(),
+            new_board.to_play,
+            new_board.consecutive_passes,
+            new_board.prisoners_black,
+            new_board.prisoners_white,
+            new_board._prev_pos_hash,
+        )
+    ]
+    return new_board
+
+
+class _MCTSNode:
+    def __init__(self, prior: float):
+        self.prior = float(prior)
+        self.visit_count = 0
+        self.value_sum = 0.0
+        self.children: Dict[int, "_MCTSNode"] = {}
+
+    def value(self) -> float:
+        if self.visit_count == 0:
+            return 0.0
+        return self.value_sum / self.visit_count
+
+
+def _select_child(node: _MCTSNode, cpuct: float) -> Tuple[int, _MCTSNode]:
+    total_visits = sum(child.visit_count for child in node.children.values())
+    best_score = -1e9
+    best_action = 0
+    best_child = None
+    for action_idx, child in node.children.items():
+        q = child.value()
+        u = cpuct * child.prior * math.sqrt(total_visits + 1) / (1 + child.visit_count)
+        score = q + u
+        if score > best_score:
+            best_score = score
+            best_action = action_idx
+            best_child = child
+    if best_child is None:
+        raise RuntimeError("MCTS selection failed")
+    return best_action, best_child
+
+
+def _terminal_value(board: GoBoard, komi: float, max_moves: int) -> Optional[float]:
+    if board.consecutive_passes >= 2 or board.move_count() >= max_moves:
+        score_diff = board.score_area(komi=komi)
+        result_black = 1.0 if score_diff > 0 else -1.0
+        return result_black if board.to_play == BLACK else -result_black
+    return None
+
+
+def _expand_node(model: tf.keras.Model, node: _MCTSNode, board: GoBoard) -> float:
+    state = encode_board(board)
+    mask = legal_moves_mask(board)
+    logits, value = model(state[None, ...], training=False)
+    logits = logits.numpy()[0]
+    value = float(value.numpy()[0][0])
+    probs = _masked_softmax(logits, mask)
+    for idx, p in enumerate(probs):
+        if mask[idx] > 0:
+            node.children[idx] = _MCTSNode(p)
+    return value
+
+
+def _mcts_search(
+    model: tf.keras.Model,
+    board: GoBoard,
+    num_simulations: int,
+    cpuct: float,
+    komi: float,
+    max_moves: int,
+) -> Tuple[np.ndarray, float]:
+    root = _MCTSNode(1.0)
+    root_value = _expand_node(model, root, board)
+
+    for _ in range(num_simulations):
+        node = root
+        sim_board = _clone_board(board)
+        path = [node]
+        while node.children:
+            action_idx, node = _select_child(node, cpuct)
+            move = index_to_move(action_idx, sim_board.size)
+            sim_board.play(move[0], move[1])
+            path.append(node)
+
+        terminal = _terminal_value(sim_board, komi, max_moves)
+        if terminal is None:
+            value = _expand_node(model, node, sim_board)
+        else:
+            value = terminal
+
+        for n in reversed(path):
+            n.visit_count += 1
+            n.value_sum += value
+            value = -value
+
+    action_size = board.size * board.size + 1
+    counts = np.zeros(action_size, dtype=np.float32)
+    for action_idx, child in root.children.items():
+        counts[action_idx] = child.visit_count
+    total = np.sum(counts)
+    if total <= 0:
+        mask = legal_moves_mask(board)
+        counts = mask / np.sum(mask)
+    else:
+        counts = counts / total
+    return counts, root_value
+
+
 def sample_action(model: tf.keras.Model, board: GoBoard) -> Tuple[int, float]:
     state = encode_board(board)
     mask = legal_moves_mask(board)
     logits, value = model(state[None, ...], training=False)
     logits = logits.numpy()[0]
     value = float(value.numpy()[0][0])
-    masked = np.where(mask > 0, logits, -1e9)
-    exps = np.exp(masked - np.max(masked))
-    probs = exps * mask
-    total = np.sum(probs)
-    if total <= 0:
-        probs = mask / np.sum(mask)
-    else:
-        probs = probs / total
+    probs = _masked_softmax(logits, mask)
     return int(np.random.choice(len(probs), p=probs)), value
 
 
@@ -125,6 +247,9 @@ def play_episode(
     value_window: int = DEFAULT_VALUE_WINDOW,
     value_delta: float = DEFAULT_VALUE_DELTA,
     value_margin: float = DEFAULT_VALUE_MARGIN,
+    use_mcts: bool = False,
+    mcts_simulations: int = 0,
+    mcts_cpuct: float = 1.5,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, List[Tuple[int, Tuple[int, int]]]]:
     board = GoBoard(board_size)
     states: List[np.ndarray] = []
@@ -136,7 +261,18 @@ def play_episode(
     move_count = 0
     while board.consecutive_passes < 2 and move_count < max_moves:
         state = encode_board(board)
-        action_idx, value = sample_action(model, board)
+        if use_mcts and mcts_simulations > 0:
+            probs, value = _mcts_search(
+                model,
+                board,
+                mcts_simulations,
+                mcts_cpuct,
+                komi,
+                max_moves,
+            )
+            action_idx = int(np.random.choice(len(probs), p=probs))
+        else:
+            action_idx, value = sample_action(model, board)
         recent_values.append(value)
         if len(recent_values) > value_window:
             recent_values.pop(0)
@@ -179,6 +315,8 @@ def train(
     komi: float = DEFAULT_KOMI,
     save_every: int = DEFAULT_SAVE_EVERY,
     sleep_time: float = DEFAULT_SLEEP,
+    mcts_simulations: int = 0,
+    mcts_cpuct: float = 1.5,
 ):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -205,6 +343,9 @@ def train(
                 model,
                 board_size,
                 komi,
+                use_mcts=mcts_simulations > 0,
+                mcts_simulations=mcts_simulations,
+                mcts_cpuct=mcts_cpuct,
             )
             with tf.GradientTape() as tape:
                 logits, values = model(states, training=True)
@@ -261,6 +402,8 @@ if __name__ == "__main__":
     parser.add_argument("--komi", type=float, default=DEFAULT_KOMI, help="komi")
     parser.add_argument("--save-every", type=int, default=DEFAULT_SAVE_EVERY, help="save interval")
     parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help="sleep seconds per episode")
+    parser.add_argument("--mcts-sims", type=int, default=0, help="MCTS simulations per move (0 to disable)")
+    parser.add_argument("--mcts-cpuct", type=float, default=1.5, help="MCTS exploration constant")
     args = parser.parse_args()
     train(
         args.episodes,
@@ -268,4 +411,6 @@ if __name__ == "__main__":
         komi=args.komi,
         save_every=args.save_every,
         sleep_time=args.sleep,
+        mcts_simulations=args.mcts_sims,
+        mcts_cpuct=args.mcts_cpuct,
     )
