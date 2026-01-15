@@ -50,8 +50,8 @@ Optional flags:
 - `--buffer-size 5000`
 - `--batch-size 256`
 - `--train-steps 1`
-- `--resign-threshold 0.9`
-- `--resign-start 50`
+- `--resign-threshold 0.98`
+- `--resign-start 150`
 - `--data-dir ./data`
 - `--selfplay-only`
 - `--train-only`
@@ -148,8 +148,8 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `--buffer-size 5000`
 - `--batch-size 256`
 - `--train-steps 1`
-- `--resign-threshold 0.9`
-- `--resign-start 50`
+- `--resign-threshold 0.98`
+- `--resign-start 150`
 - `--data-dir ./data`
 - `--selfplay-only`
 - `--train-only`
