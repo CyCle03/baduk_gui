@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import time
 from typing import List, Tuple
@@ -30,6 +31,7 @@ DEFAULT_VALUE_WINDOW = 20
 DEFAULT_VALUE_DELTA = 0.05
 DEFAULT_VALUE_MARGIN = 0.6
 DEFAULT_SLEEP = 0.0
+TRAIN_STATE_PATH = os.path.join(BASE_DIR, "train_state.json")
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -62,6 +64,27 @@ def _save_sgf(
     path = os.path.join(sgf_dir, f"selfplay_{episode:06d}_{timestamp}.sgf")
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+
+
+def _load_train_state(path: str) -> dict:
+    if not os.path.exists(path):
+        return {"total_episodes": 0}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "total_episodes" in data:
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"total_episodes": 0}
+
+
+def _save_train_state(path: str, data: dict) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=True, indent=2)
+    except OSError:
+        pass
 
 
 def sample_action(model: tf.keras.Model, board: GoBoard) -> Tuple[int, float]:
@@ -147,6 +170,8 @@ def train(
 ):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
+    train_state = _load_train_state(TRAIN_STATE_PATH)
+
     model = load_or_create_model(MODEL_PATH, board_size)
     optimizer = tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE)
     # Build variables before restoring optimizer state.
@@ -163,6 +188,7 @@ def train(
         for episode in range(1, num_episodes + 1):
             episode_start = time.perf_counter()
             last_episode = episode
+            train_state["total_episodes"] = train_state.get("total_episodes", 0) + 1
             states, actions, rewards, value_targets, score_diff, moves = play_episode(
                 model,
                 board_size,
@@ -185,6 +211,7 @@ def train(
                 model.save(checkpoint_path)
                 manager.save(checkpoint_number=episode)
                 _save_sgf(moves, score_diff, episode, board_size, komi, SGF_DIR)
+                _save_train_state(TRAIN_STATE_PATH, train_state)
 
             episode_time = time.perf_counter() - episode_start
             total_time = time.perf_counter() - start_time
@@ -210,6 +237,7 @@ def train(
             checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{last_episode:06d}.keras")
             model.save(checkpoint_path)
             manager.save(checkpoint_number=last_episode)
+            _save_train_state(TRAIN_STATE_PATH, train_state)
 
 
 if __name__ == "__main__":

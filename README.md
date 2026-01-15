@@ -63,6 +63,9 @@ Log fields:
 - `avg_time`: average time per episode
 - `recent10_avg`: moving average of last 10 episodes
 
+Total episode counter:
+- `train_state.json` stores cumulative `total_episodes` across runs.
+
 ## Notes
 
 - Training is CPU-only unless TensorFlow detects a GPU.
@@ -134,3 +137,6 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `total_time`: 누적 시간
 - `avg_time`: 판당 평균 시간
 - `recent10_avg`: 최근 10판 평균
+
+누적 판수:
+- `train_state.json`에 전체 `total_episodes`가 누적 저장됩니다.
