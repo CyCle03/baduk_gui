@@ -661,13 +661,13 @@ class MainWindow(QWidget):
         elif self.use_mcts:
             if self._ensure_policy_ai():
                 try:
-                mv = _mcts_pick_move(
-                    self.ai.model,
-                    self.board,
-                    self.mcts_simulations,
-                    self.mcts_cpuct,
-                    self.ai_vs_ai,
-                )
+                    mv = _mcts_pick_move(
+                        self.ai.model,
+                        self.board,
+                        self.mcts_simulations,
+                        self.mcts_cpuct,
+                        self.ai_vs_ai,
+                    )
                 except Exception:
                     mv = self.ai.select_move(self.board)
             else:
