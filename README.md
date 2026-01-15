@@ -38,6 +38,12 @@ The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 .venv/bin/python train_selfplay.py --episodes 1000
 ```
 
+Optional flags:
+- `--board-size 19`
+- `--komi 6.5`
+- `--save-every 10`
+- `--sleep 0.0`
+
 Models are saved to:
 - `models/latest.keras` (latest)
 - `models/checkpoint_XXXXXX.keras` (every N episodes)
@@ -103,6 +109,12 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 ```bash
 .venv/bin/python train_selfplay.py --episodes 1000
 ```
+
+옵션:
+- `--board-size 19`
+- `--komi 6.5`
+- `--save-every 10`
+- `--sleep 0.0` (에피소드 간 대기 시간, 0이면 없음)
 
 모델 저장 위치:
 - `models/latest.keras` (최신)

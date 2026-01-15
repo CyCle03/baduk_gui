@@ -201,6 +201,7 @@ class MainWindow(QWidget):
         self.ai_vs_ai = False
         self.train_running = False
         self.last_train_status = "대기"
+        self.model_status = "대기"
         self.sgf_mode = False
         self.sgf_moves: List[Tuple[int, Tuple[int, int]]] = []
         self.sgf_index = 0
@@ -311,6 +312,7 @@ class MainWindow(QWidget):
             f"진행 수: {self.board.move_count()}\n"
             f"학습: {train_state}\n"
             f"학습 상태: {self.last_train_status}\n"
+            f"모델: {self.model_status}\n"
             f"포로(흑이 딴 수 / 백이 딴 수): {self.board.prisoners_black} / {self.board.prisoners_white}\n"
             f"연속 패스: {self.board.consecutive_passes}"
             f"{sgf_state}"
@@ -423,15 +425,21 @@ class MainWindow(QWidget):
 
     def on_reload_model(self):
         if PolicyAI is None:
+            self.model_status = "TensorFlow 없음"
             QMessageBox.information(self, "모델 로드 실패", "TensorFlow를 사용할 수 없습니다.")
+            self._update_status()
             return
         if not os.path.exists(self.model_path):
+            self.model_status = "모델 없음"
             QMessageBox.information(self, "모델 없음", "models/latest.keras 파일이 없습니다.")
+            self._update_status()
             return
         if isinstance(self.ai, PolicyAI):
             self.ai.reload()
         else:
             self.ai = self._make_ai()
+        self.model_status = "모델 로드됨"
+        self._update_status()
 
     def on_toggle_selfplay(self):
         self.ai_vs_ai = not self.ai_vs_ai
@@ -556,8 +564,8 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "SGF 통계", "SGF 파일이 없습니다.")
             return
 
-        re_result = re.compile(r"RE\\[([^\\]]+)\\]")
-        re_moves = re.compile(r";[BW]\\[")
+        re_result = re.compile(r"RE\[([^\]]+)\]")
+        re_moves = re.compile(r";[BW]\[")
         b_wins = 0
         w_wins = 0
         total_moves = 0
@@ -602,7 +610,25 @@ class MainWindow(QWidget):
             # Ensure to_play matches SGF sequence.
             if self.board.to_play != player:
                 self.board.to_play = player
-            self.board.play(move[0], move[1])
+            try:
+                self.board.play(move[0], move[1])
+            except IllegalMove:
+                self._sgf_play_timer.stop()
+                self.btn_sgf_play.setText("SGF PLAY")
+                QMessageBox.information(
+                    self,
+                    "SGF 오류",
+                    f"{i + 1}번째 수에서 IllegalMove가 발생했습니다. SGF 재생을 종료합니다.",
+                )
+                self.sgf_mode = False
+                self.sgf_moves = []
+                self.sgf_index = 0
+                self.board = GoBoard(19)
+                self.board_widget.board = self.board
+                self._update_sgf_controls()
+                self._update_status()
+                self.board_widget.update()
+                return
         self.board_widget.board = self.board
         self._update_status()
         self.board_widget.update()

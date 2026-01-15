@@ -15,20 +15,21 @@ from rl_model import (
     move_to_index,
 )
 
-BOARD_SIZE = 19
+DEFAULT_BOARD_SIZE = 19
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "latest.keras")
 CKPT_DIR = os.path.join(BASE_DIR, "checkpoints")
 SGF_DIR = os.path.join(BASE_DIR, "sgf")
-SAVE_EVERY = 10
-MAX_MOVES = 400
-KOMI = 6.5
-LEARNING_RATE = 1e-4
-PASS_START = 300
-VALUE_WINDOW = 20
-VALUE_DELTA = 0.05
-VALUE_MARGIN = 0.6
+DEFAULT_SAVE_EVERY = 10
+DEFAULT_MAX_MOVES = 400
+DEFAULT_KOMI = 6.5
+DEFAULT_LEARNING_RATE = 1e-4
+DEFAULT_PASS_START = 300
+DEFAULT_VALUE_WINDOW = 20
+DEFAULT_VALUE_DELTA = 0.05
+DEFAULT_VALUE_MARGIN = 0.6
+DEFAULT_SLEEP = 0.0
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -36,8 +37,15 @@ def _sgf_coord(x: int, y: int) -> str:
     return f"{letters[x]}{letters[y]}"
 
 
-def _save_sgf(moves: List[Tuple[int, Tuple[int, int]]], score_diff: float, episode: int):
-    os.makedirs(SGF_DIR, exist_ok=True)
+def _save_sgf(
+    moves: List[Tuple[int, Tuple[int, int]]],
+    score_diff: float,
+    episode: int,
+    board_size: int,
+    komi: float,
+    sgf_dir: str,
+):
+    os.makedirs(sgf_dir, exist_ok=True)
     result = f"B+{abs(score_diff):.1f}" if score_diff > 0 else f"W+{abs(score_diff):.1f}"
     sgf_moves = []
     for player, move in moves:
@@ -47,11 +55,11 @@ def _save_sgf(moves: List[Tuple[int, Tuple[int, int]]], score_diff: float, episo
         else:
             coord = _sgf_coord(move[0], move[1])
         sgf_moves.append(f";{color}[{coord}]")
-    header = f"(;GM[1]FF[4]SZ[{BOARD_SIZE}]KM[{KOMI}]RE[{result}]"
+    header = f"(;GM[1]FF[4]SZ[{board_size}]KM[{komi}]RE[{result}]"
     body = "".join(sgf_moves)
     content = f"{header}{body})"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(SGF_DIR, f"selfplay_{episode:06d}_{timestamp}.sgf")
+    path = os.path.join(sgf_dir, f"selfplay_{episode:06d}_{timestamp}.sgf")
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
@@ -75,8 +83,15 @@ def sample_action(model: tf.keras.Model, board: GoBoard) -> Tuple[int, float]:
 
 def play_episode(
     model: tf.keras.Model,
+    board_size: int,
+    komi: float,
+    max_moves: int = DEFAULT_MAX_MOVES,
+    pass_start: int = DEFAULT_PASS_START,
+    value_window: int = DEFAULT_VALUE_WINDOW,
+    value_delta: float = DEFAULT_VALUE_DELTA,
+    value_margin: float = DEFAULT_VALUE_MARGIN,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, List[Tuple[int, Tuple[int, int]]]]:
-    board = GoBoard(BOARD_SIZE)
+    board = GoBoard(board_size)
     states: List[np.ndarray] = []
     actions: List[int] = []
     players: List[int] = []
@@ -84,19 +99,19 @@ def play_episode(
     recent_values: List[float] = []
 
     move_count = 0
-    while board.consecutive_passes < 2 and move_count < MAX_MOVES:
+    while board.consecutive_passes < 2 and move_count < max_moves:
         state = encode_board(board)
         action_idx, value = sample_action(model, board)
         recent_values.append(value)
-        if len(recent_values) > VALUE_WINDOW:
+        if len(recent_values) > value_window:
             recent_values.pop(0)
 
         stable = (
-            move_count >= PASS_START
-            and len(recent_values) >= VALUE_WINDOW
-            and (max(recent_values) - min(recent_values) <= VALUE_DELTA)
+            move_count >= pass_start
+            and len(recent_values) >= value_window
+            and (max(recent_values) - min(recent_values) <= value_delta)
         )
-        should_pass = stable and abs(value) >= VALUE_MARGIN
+        should_pass = stable and abs(value) >= value_margin
 
         if should_pass:
             action_idx = move_to_index(PASS_MOVE, board.size)
@@ -109,7 +124,7 @@ def play_episode(
         board.play(move[0], move[1])
         move_count += 1
 
-    score_diff = board.score_area(komi=KOMI)
+    score_diff = board.score_area(komi=komi)
     result = 1.0 if score_diff > 0 else -1.0
     value_targets = np.array([result if p == BLACK else -result for p in players], dtype=np.float32)
     rewards = value_targets - np.mean(value_targets)
@@ -123,13 +138,19 @@ def play_episode(
     )
 
 
-def train(num_episodes: int = 10000):
+def train(
+    num_episodes: int = 10000,
+    board_size: int = DEFAULT_BOARD_SIZE,
+    komi: float = DEFAULT_KOMI,
+    save_every: int = DEFAULT_SAVE_EVERY,
+    sleep_time: float = DEFAULT_SLEEP,
+):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    model = load_or_create_model(MODEL_PATH, BOARD_SIZE)
-    optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+    model = load_or_create_model(MODEL_PATH, board_size)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE)
     # Build variables before restoring optimizer state.
-    _ = model(tf.zeros((1, BOARD_SIZE, BOARD_SIZE, 3)))
+    _ = model(tf.zeros((1, board_size, board_size, 3)))
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
     manager = tf.train.CheckpointManager(checkpoint, CKPT_DIR, max_to_keep=3)
     if manager.latest_checkpoint:
@@ -142,7 +163,11 @@ def train(num_episodes: int = 10000):
         for episode in range(1, num_episodes + 1):
             episode_start = time.perf_counter()
             last_episode = episode
-            states, actions, rewards, value_targets, score_diff, moves = play_episode(model)
+            states, actions, rewards, value_targets, score_diff, moves = play_episode(
+                model,
+                board_size,
+                komi,
+            )
             with tf.GradientTape() as tape:
                 logits, values = model(states, training=True)
                 ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=actions, logits=logits)
@@ -154,12 +179,12 @@ def train(num_episodes: int = 10000):
             grads = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-            if episode % SAVE_EVERY == 0:
+            if episode % save_every == 0:
                 model.save(MODEL_PATH)
                 checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{episode:06d}.keras")
                 model.save(checkpoint_path)
                 manager.save(checkpoint_number=episode)
-                _save_sgf(moves, score_diff, episode)
+                _save_sgf(moves, score_diff, episode, board_size, komi, SGF_DIR)
 
             episode_time = time.perf_counter() - episode_start
             total_time = time.perf_counter() - start_time
@@ -175,7 +200,8 @@ def train(num_episodes: int = 10000):
                 f"avg_time={avg_time:.2f}s recent10_avg={recent_avg:.2f}s"
             )
 
-            time.sleep(0.01)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
     except KeyboardInterrupt:
         print("Interrupted: saving latest model...")
     finally:
@@ -189,5 +215,15 @@ def train(num_episodes: int = 10000):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Self-play trainer")
     parser.add_argument("--episodes", type=int, default=1000, help="number of self-play episodes")
+    parser.add_argument("--board-size", type=int, default=DEFAULT_BOARD_SIZE, help="board size")
+    parser.add_argument("--komi", type=float, default=DEFAULT_KOMI, help="komi")
+    parser.add_argument("--save-every", type=int, default=DEFAULT_SAVE_EVERY, help="save interval")
+    parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help="sleep seconds per episode")
     args = parser.parse_args()
-    train(args.episodes)
+    train(
+        args.episodes,
+        board_size=args.board_size,
+        komi=args.komi,
+        save_every=args.save_every,
+        sleep_time=args.sleep,
+    )
