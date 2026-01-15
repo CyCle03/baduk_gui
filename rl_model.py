@@ -51,12 +51,27 @@ def legal_moves_mask(board: GoBoard) -> np.ndarray:
 def build_policy_model(board_size: int) -> tf.keras.Model:
     inputs = tf.keras.Input(shape=(board_size, board_size, 3))
     x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(inputs)
-    x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(x)
-    x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(x)
-    x = tf.keras.layers.Flatten()(x)
-    x = tf.keras.layers.Dense(256, activation="relu")(x)
-    logits = tf.keras.layers.Dense(action_size(board_size), name="policy_logits")(x)
-    value = tf.keras.layers.Dense(1, activation="tanh", name="value")(x)
+
+    def residual_block(t):
+        skip = t
+        t = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(t)
+        t = tf.keras.layers.Conv2D(64, 3, padding="same")(t)
+        t = tf.keras.layers.Add()([t, skip])
+        return tf.keras.layers.Activation("relu")(t)
+
+    for _ in range(4):
+        x = residual_block(x)
+
+    # Policy head
+    p = tf.keras.layers.Conv2D(2, 1, padding="same", activation="relu")(x)
+    p = tf.keras.layers.Flatten()(p)
+    logits = tf.keras.layers.Dense(action_size(board_size), name="policy_logits")(p)
+
+    # Value head
+    v = tf.keras.layers.Conv2D(1, 1, padding="same", activation="relu")(x)
+    v = tf.keras.layers.Flatten()(v)
+    v = tf.keras.layers.Dense(64, activation="relu")(v)
+    value = tf.keras.layers.Dense(1, activation="tanh", name="value")(v)
     return tf.keras.Model(inputs, [logits, value])
 
 
@@ -79,7 +94,13 @@ def load_or_create_model(path: str, board_size: int) -> tf.keras.Model:
     if os.path.exists(path):
         model = tf.keras.models.load_model(path)
         if len(model.outputs) == 2:
-            return model
+            input_shape = model.input_shape
+            if isinstance(input_shape, list):
+                input_shape = input_shape[0]
+            if input_shape[1] == board_size and input_shape[2] == board_size:
+                return model
+            print("Model board size mismatch; creating new policy+value model.")
+            return build_policy_model(board_size)
         print("Loaded legacy policy-only model; creating new policy+value model.")
         return build_policy_model(board_size)
     return build_policy_model(board_size)

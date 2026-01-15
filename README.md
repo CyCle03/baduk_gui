@@ -45,8 +45,21 @@ Optional flags:
 - `--komi 6.5`
 - `--save-every 10`
 - `--sleep 0.0`
-- `--mcts-sims 0`
+- `--mcts-sims 50`
 - `--mcts-cpuct 1.5`
+- `--buffer-size 5000`
+- `--batch-size 256`
+- `--train-steps 1`
+- `--resign-threshold 0.9`
+- `--resign-start 50`
+- `--data-dir ./data`
+- `--selfplay-only`
+- `--train-only`
+- `--save-selfplay`
+- `--max-data-files 0`
+- `--progress` / `--no-progress`
+- `--progress` / `--no-progress`
+- `--progress` / `--no-progress`
 
 Models are saved to:
 - `models/latest.keras` (latest)
@@ -69,6 +82,11 @@ Log fields:
 
 Total episode counter:
 - `train_state.json` stores cumulative `total_episodes` across runs.
+
+Self-play data modes:
+- `--selfplay-only`: generate self-play data to `--data-dir` only
+- `--train-only`: train from data in `--data-dir` only
+- `--save-selfplay`: save self-play data while training
 
 ## Notes
 
@@ -125,8 +143,19 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `--komi 6.5`
 - `--save-every 10`
 - `--sleep 0.0` (에피소드 간 대기 시간, 0이면 없음)
-- `--mcts-sims 0`
+- `--mcts-sims 50`
 - `--mcts-cpuct 1.5`
+- `--buffer-size 5000`
+- `--batch-size 256`
+- `--train-steps 1`
+- `--resign-threshold 0.9`
+- `--resign-start 50`
+- `--data-dir ./data`
+- `--selfplay-only`
+- `--train-only`
+- `--save-selfplay`
+- `--max-data-files 0`
+- `--progress` / `--no-progress`
 
 모델 저장 위치:
 - `models/latest.keras` (최신)
@@ -151,3 +180,8 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 
 누적 판수:
 - `train_state.json`에 전체 `total_episodes`가 누적 저장됩니다.
+
+자가대국 데이터 모드:
+- `--selfplay-only`: `--data-dir`에 자가대국 데이터만 생성
+- `--train-only`: `--data-dir` 데이터를 불러 학습만 수행
+- `--save-selfplay`: 학습 중 자가대국 데이터를 저장

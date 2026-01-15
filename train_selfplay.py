@@ -4,7 +4,8 @@ import math
 import os
 import shutil
 import time
-from typing import Dict, List, Optional, Tuple
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -33,6 +34,12 @@ DEFAULT_VALUE_WINDOW = 20
 DEFAULT_VALUE_DELTA = 0.05
 DEFAULT_VALUE_MARGIN = 0.6
 DEFAULT_SLEEP = 0.0
+DEFAULT_BUFFER_SIZE = 5000
+DEFAULT_BATCH_SIZE = 256
+DEFAULT_TRAIN_STEPS = 1
+DEFAULT_RESIGN_THRESHOLD = 0.9
+DEFAULT_RESIGN_START = 50
+DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 TRAIN_STATE_PATH = os.path.join(BASE_DIR, "train_state.json")
 TRAIN_STATE_BACKUP_PATH = os.path.join(MODEL_DIR, "train_state_backup.json")
 
@@ -98,6 +105,107 @@ def _backup_train_state(src_path: str, backup_path: str) -> None:
         shutil.copy2(src_path, backup_path)
     except OSError:
         pass
+
+
+def _save_episode_data(
+    data_dir: str,
+    episode: int,
+    states: np.ndarray,
+    actions: np.ndarray,
+    policy_targets: Optional[np.ndarray],
+    rewards: np.ndarray,
+    value_targets: np.ndarray,
+) -> str:
+    os.makedirs(data_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(data_dir, f"episode_{episode:06d}_{timestamp}.npz")
+    if policy_targets is not None:
+        np.savez_compressed(
+            path,
+            states=states,
+            actions=actions,
+            policy_targets=policy_targets,
+            rewards=rewards,
+            value_targets=value_targets,
+        )
+    else:
+        np.savez_compressed(
+            path,
+            states=states,
+            actions=actions,
+            rewards=rewards,
+            value_targets=value_targets,
+        )
+    return path
+
+
+def _load_data_dir(
+    buffer: "ReplayBuffer", data_dir: str, max_files: Optional[int] = None
+) -> int:
+    if not os.path.isdir(data_dir):
+        return 0
+    files = [f for f in os.listdir(data_dir) if f.endswith(".npz")]
+    files.sort()
+    if max_files is not None and max_files > 0:
+        files = files[-max_files:]
+    total = 0
+    for name in files:
+        path = os.path.join(data_dir, name)
+        try:
+            data = np.load(path)
+        except OSError:
+            continue
+        states = data["states"]
+        actions = data["actions"]
+        rewards = data["rewards"]
+        value_targets = data["value_targets"]
+        policy_targets = data["policy_targets"] if "policy_targets" in data else None
+        buffer.add(states, actions, policy_targets, rewards, value_targets)
+        total += len(states)
+    return total
+
+
+class ReplayBuffer:
+    def __init__(self, capacity: int, use_policy_targets: bool):
+        self.capacity = capacity
+        self.use_policy_targets = use_policy_targets
+        self.states: Deque[np.ndarray] = deque(maxlen=capacity)
+        self.actions: Deque[int] = deque(maxlen=capacity)
+        self.policy_targets: Deque[Optional[np.ndarray]] = deque(maxlen=capacity)
+        self.rewards: Deque[float] = deque(maxlen=capacity)
+        self.value_targets: Deque[float] = deque(maxlen=capacity)
+
+    def add(
+        self,
+        states: np.ndarray,
+        actions: np.ndarray,
+        policy_targets: Optional[np.ndarray],
+        rewards: np.ndarray,
+        value_targets: np.ndarray,
+    ) -> None:
+        for i in range(len(states)):
+            self.states.append(states[i])
+            self.actions.append(int(actions[i]))
+            if self.use_policy_targets:
+                self.policy_targets.append(policy_targets[i] if policy_targets is not None else None)
+            else:
+                self.policy_targets.append(None)
+            self.rewards.append(float(rewards[i]))
+            self.value_targets.append(float(value_targets[i]))
+
+    def sample(self, batch_size: int):
+        idx = np.random.choice(len(self.states), size=batch_size, replace=False)
+        states = np.array([self.states[i] for i in idx], dtype=np.float32)
+        actions = np.array([self.actions[i] for i in idx], dtype=np.int32)
+        rewards = np.array([self.rewards[i] for i in idx], dtype=np.float32)
+        value_targets = np.array([self.value_targets[i] for i in idx], dtype=np.float32)
+        policy_targets = None
+        if self.use_policy_targets:
+            policy_targets = np.array([self.policy_targets[i] for i in idx], dtype=np.float32)
+        return states, actions, policy_targets, rewards, value_targets
+
+    def __len__(self) -> int:
+        return len(self.states)
 
 
 def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -238,6 +346,14 @@ def sample_action(model: tf.keras.Model, board: GoBoard) -> Tuple[int, float]:
     return int(np.random.choice(len(probs), p=probs)), value
 
 
+def _render_progress_bar(current: int, total: int, width: int = 20) -> str:
+    if total <= 0:
+        total = 1
+    ratio = min(max(current / total, 0.0), 1.0)
+    filled = int(ratio * width)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
 def play_episode(
     model: tf.keras.Model,
     board_size: int,
@@ -250,15 +366,29 @@ def play_episode(
     use_mcts: bool = False,
     mcts_simulations: int = 0,
     mcts_cpuct: float = 1.5,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, List[Tuple[int, Tuple[int, int]]]]:
+    resign_threshold: float = DEFAULT_RESIGN_THRESHOLD,
+    resign_start: int = DEFAULT_RESIGN_START,
+    show_progress: bool = False,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    Optional[np.ndarray],
+    np.ndarray,
+    np.ndarray,
+    float,
+    List[Tuple[int, Tuple[int, int]]],
+]:
     board = GoBoard(board_size)
     states: List[np.ndarray] = []
     actions: List[int] = []
     players: List[int] = []
     moves: List[Tuple[int, Tuple[int, int]]] = []
+    policy_targets: List[np.ndarray] = []
     recent_values: List[float] = []
 
     move_count = 0
+    resigned = False
+    resign_player = None
     while board.consecutive_passes < 2 and move_count < max_moves:
         state = encode_board(board)
         if use_mcts and mcts_simulations > 0:
@@ -270,9 +400,15 @@ def play_episode(
                 komi,
                 max_moves,
             )
+            policy_targets.append(probs)
             action_idx = int(np.random.choice(len(probs), p=probs))
         else:
             action_idx, value = sample_action(model, board)
+
+        if resign_threshold > 0 and move_count >= resign_start and value <= -resign_threshold:
+            resigned = True
+            resign_player = board.to_play
+            break
         recent_values.append(value)
         if len(recent_values) > value_window:
             recent_values.pop(0)
@@ -294,14 +430,24 @@ def play_episode(
         moves.append((board.to_play, move))
         board.play(move[0], move[1])
         move_count += 1
+        if show_progress:
+            bar = _render_progress_bar(move_count, max_moves)
+            pct = int((move_count / max_moves) * 100)
+            print(f"progress {bar} {pct:3d}% (moves {move_count}/{max_moves})", end="\r", flush=True)
 
-    score_diff = board.score_area(komi=komi)
+    if resigned:
+        score_diff = -1.0 if resign_player == BLACK else 1.0
+    else:
+        score_diff = board.score_area(komi=komi)
+    if show_progress:
+        print(" " * 80, end="\r")
     result = 1.0 if score_diff > 0 else -1.0
     value_targets = np.array([result if p == BLACK else -result for p in players], dtype=np.float32)
     rewards = value_targets - np.mean(value_targets)
     return (
         np.array(states, dtype=np.float32),
         np.array(actions, dtype=np.int32),
+        np.array(policy_targets, dtype=np.float32) if policy_targets else None,
         rewards,
         value_targets,
         score_diff,
@@ -315,8 +461,19 @@ def train(
     komi: float = DEFAULT_KOMI,
     save_every: int = DEFAULT_SAVE_EVERY,
     sleep_time: float = DEFAULT_SLEEP,
-    mcts_simulations: int = 0,
+    mcts_simulations: int = 50,
     mcts_cpuct: float = 1.5,
+    buffer_size: int = DEFAULT_BUFFER_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    train_steps: int = DEFAULT_TRAIN_STEPS,
+    resign_threshold: float = DEFAULT_RESIGN_THRESHOLD,
+    resign_start: int = DEFAULT_RESIGN_START,
+    data_dir: str = DEFAULT_DATA_DIR,
+    selfplay_only: bool = False,
+    train_only: bool = False,
+    save_selfplay: bool = False,
+    max_data_files: Optional[int] = None,
+    show_progress: bool = True,
 ):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -334,36 +491,104 @@ def train(
 
     start_time = time.perf_counter()
     recent_times: List[float] = []
+    use_policy_targets = mcts_simulations > 0
+    buffer = ReplayBuffer(buffer_size, use_policy_targets=use_policy_targets)
+
+    if selfplay_only and train_only:
+        print("selfplay-only and train-only cannot be used together.")
+        return
+
+    if train_only:
+        loaded = _load_data_dir(buffer, data_dir, max_files=max_data_files)
+        if loaded == 0:
+            print("No training data found; skipping train-only mode.")
+            return
+
     try:
         for episode in range(1, num_episodes + 1):
             episode_start = time.perf_counter()
             last_episode = episode
-            train_state["total_episodes"] = train_state.get("total_episodes", 0) + 1
-            states, actions, rewards, value_targets, score_diff, moves = play_episode(
-                model,
-                board_size,
-                komi,
-                use_mcts=mcts_simulations > 0,
-                mcts_simulations=mcts_simulations,
-                mcts_cpuct=mcts_cpuct,
-            )
-            with tf.GradientTape() as tape:
-                logits, values = model(states, training=True)
-                ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=actions, logits=logits)
-                policy_loss = tf.reduce_mean(ce * rewards)
-                values = tf.squeeze(values, axis=-1)
-                value_loss = tf.reduce_mean(tf.square(values - value_targets))
-                loss = policy_loss + 0.5 * value_loss
+            if train_only:
+                score_diff = 0.0
+                moves = []
+                actions = np.array([], dtype=np.int32)
+            else:
+                train_state["total_episodes"] = train_state.get("total_episodes", 0) + 1
+                states, actions, policy_targets, rewards, value_targets, score_diff, moves = play_episode(
+                    model,
+                    board_size,
+                    komi,
+                    use_mcts=mcts_simulations > 0,
+                    mcts_simulations=mcts_simulations,
+                    mcts_cpuct=mcts_cpuct,
+                    resign_threshold=resign_threshold,
+                    resign_start=resign_start,
+                    show_progress=show_progress,
+                )
+                buffer.add(states, actions, policy_targets, rewards, value_targets)
 
-            grads = tape.gradient(loss, model.trainable_variables)
-            optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                if save_selfplay or selfplay_only:
+                    _save_episode_data(
+                        data_dir, episode, states, actions, policy_targets, rewards, value_targets
+                    )
 
-            if episode % save_every == 0:
+            if not selfplay_only:
+                if len(buffer) >= batch_size:
+                    for _ in range(train_steps):
+                        b_states, b_actions, b_policy_targets, b_rewards, b_value_targets = buffer.sample(
+                            batch_size
+                        )
+                        with tf.GradientTape() as tape:
+                            logits, values = model(b_states, training=True)
+                            if b_policy_targets is not None:
+                                targets = tf.convert_to_tensor(b_policy_targets, dtype=tf.float32)
+                                log_probs = tf.nn.log_softmax(logits)
+                                policy_loss = -tf.reduce_mean(tf.reduce_sum(targets * log_probs, axis=-1))
+                            else:
+                                ce = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                                    labels=b_actions, logits=logits
+                                )
+                                policy_loss = tf.reduce_mean(ce * b_rewards)
+                            values = tf.squeeze(values, axis=-1)
+                            value_loss = tf.reduce_mean(tf.square(values - b_value_targets))
+                            loss = policy_loss + 0.5 * value_loss
+
+                        grads = tape.gradient(loss, model.trainable_variables)
+                        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                elif not train_only:
+                    with tf.GradientTape() as tape:
+                        logits, values = model(states, training=True)
+                        if policy_targets is not None:
+                            targets = tf.convert_to_tensor(policy_targets, dtype=tf.float32)
+                            log_probs = tf.nn.log_softmax(logits)
+                            policy_loss = -tf.reduce_mean(tf.reduce_sum(targets * log_probs, axis=-1))
+                        else:
+                            ce = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                                labels=actions, logits=logits
+                            )
+                            policy_loss = tf.reduce_mean(ce * rewards)
+                        values = tf.squeeze(values, axis=-1)
+                        value_loss = tf.reduce_mean(tf.square(values - value_targets))
+                        loss = policy_loss + 0.5 * value_loss
+
+                    grads = tape.gradient(loss, model.trainable_variables)
+                    optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                else:
+                    loss = tf.constant(0.0)
+                    policy_loss = tf.constant(0.0)
+                    value_loss = tf.constant(0.0)
+            else:
+                loss = tf.constant(0.0)
+                policy_loss = tf.constant(0.0)
+                value_loss = tf.constant(0.0)
+
+            if not selfplay_only and episode % save_every == 0:
                 model.save(MODEL_PATH)
                 checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{episode:06d}.keras")
                 model.save(checkpoint_path)
                 manager.save(checkpoint_number=episode)
-                _save_sgf(moves, score_diff, episode, board_size, komi, SGF_DIR)
+                if not train_only:
+                    _save_sgf(moves, score_diff, episode, board_size, komi, SGF_DIR)
                 _save_train_state(TRAIN_STATE_PATH, train_state)
                 _backup_train_state(TRAIN_STATE_PATH, TRAIN_STATE_BACKUP_PATH)
 
@@ -402,8 +627,24 @@ if __name__ == "__main__":
     parser.add_argument("--komi", type=float, default=DEFAULT_KOMI, help="komi")
     parser.add_argument("--save-every", type=int, default=DEFAULT_SAVE_EVERY, help="save interval")
     parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help="sleep seconds per episode")
-    parser.add_argument("--mcts-sims", type=int, default=0, help="MCTS simulations per move (0 to disable)")
+    parser.add_argument("--mcts-sims", type=int, default=50, help="MCTS simulations per move (0 to disable)")
     parser.add_argument("--mcts-cpuct", type=float, default=1.5, help="MCTS exploration constant")
+    parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="replay buffer size")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="replay batch size")
+    parser.add_argument("--train-steps", type=int, default=DEFAULT_TRAIN_STEPS, help="train steps per episode")
+    parser.add_argument("--resign-threshold", type=float, default=DEFAULT_RESIGN_THRESHOLD, help="resign threshold")
+    parser.add_argument("--resign-start", type=int, default=DEFAULT_RESIGN_START, help="min moves before resign")
+    parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR, help="self-play data directory")
+    parser.add_argument("--selfplay-only", action="store_true", help="generate self-play data only")
+    parser.add_argument("--train-only", action="store_true", help="train from data directory only")
+    parser.add_argument("--save-selfplay", action="store_true", help="save self-play data while training")
+    parser.add_argument("--max-data-files", type=int, default=0, help="max data files to load")
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show per-episode progress bar",
+    )
     args = parser.parse_args()
     train(
         args.episodes,
@@ -413,4 +654,15 @@ if __name__ == "__main__":
         sleep_time=args.sleep,
         mcts_simulations=args.mcts_sims,
         mcts_cpuct=args.mcts_cpuct,
+        buffer_size=args.buffer_size,
+        batch_size=args.batch_size,
+        train_steps=args.train_steps,
+        resign_threshold=args.resign_threshold,
+        resign_start=args.resign_start,
+        data_dir=args.data_dir,
+        selfplay_only=args.selfplay_only,
+        train_only=args.train_only,
+        save_selfplay=args.save_selfplay,
+        max_data_files=args.max_data_files if args.max_data_files > 0 else None,
+        show_progress=args.progress,
     )
