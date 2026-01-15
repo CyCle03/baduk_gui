@@ -37,6 +37,11 @@ DEFAULT_SLEEP = 0.0
 DEFAULT_BUFFER_SIZE = 5000
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_TRAIN_STEPS = 1
+DEFAULT_MCTS_SIMS = 100
+DEFAULT_DIRICHLET_ALPHA = 0.03
+DEFAULT_DIRICHLET_EPS = 0.25
+DEFAULT_MCTS_TEMP = 1.25
+DEFAULT_MCTS_TEMP_MOVES = 30
 DEFAULT_RESIGN_THRESHOLD = 0.98
 DEFAULT_RESIGN_START = 150
 DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -218,6 +223,35 @@ def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return probs / total
 
 
+def _apply_temperature(probs: np.ndarray, temperature: float) -> np.ndarray:
+    if temperature <= 0:
+        return probs
+    if abs(temperature - 1.0) < 1e-6:
+        return probs
+    scaled = np.power(probs, 1.0 / temperature)
+    total = np.sum(scaled)
+    if total <= 0:
+        return probs
+    return scaled / total
+
+
+def _add_dirichlet_noise(
+    probs: np.ndarray, mask: np.ndarray, alpha: float, eps: float
+) -> np.ndarray:
+    if eps <= 0 or alpha <= 0:
+        return probs
+    legal_indices = np.flatnonzero(mask > 0)
+    if legal_indices.size == 0:
+        return probs
+    noise = np.random.dirichlet([alpha] * legal_indices.size)
+    mixed = probs.copy()
+    mixed[legal_indices] = (1.0 - eps) * probs[legal_indices] + eps * noise
+    total = np.sum(mixed)
+    if total <= 0:
+        return probs
+    return mixed / total
+
+
 def _clone_board(board: GoBoard) -> GoBoard:
     new_board = GoBoard(board.size)
     new_board.grid = [row[:] for row in board.grid]
@@ -366,6 +400,10 @@ def play_episode(
     use_mcts: bool = False,
     mcts_simulations: int = 0,
     mcts_cpuct: float = 1.5,
+    dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    dirichlet_eps: float = DEFAULT_DIRICHLET_EPS,
+    mcts_temperature: float = DEFAULT_MCTS_TEMP,
+    mcts_temperature_moves: int = DEFAULT_MCTS_TEMP_MOVES,
     resign_threshold: float = DEFAULT_RESIGN_THRESHOLD,
     resign_start: int = DEFAULT_RESIGN_START,
     show_progress: bool = False,
@@ -400,6 +438,10 @@ def play_episode(
                 komi,
                 max_moves,
             )
+            mask = legal_moves_mask(board)
+            probs = _add_dirichlet_noise(probs, mask, dirichlet_alpha, dirichlet_eps)
+            if move_count < mcts_temperature_moves:
+                probs = _apply_temperature(probs, mcts_temperature)
             policy_targets.append(probs)
             action_idx = int(np.random.choice(len(probs), p=probs))
         else:
@@ -461,8 +503,12 @@ def train(
     komi: float = DEFAULT_KOMI,
     save_every: int = DEFAULT_SAVE_EVERY,
     sleep_time: float = DEFAULT_SLEEP,
-    mcts_simulations: int = 50,
+    mcts_simulations: int = DEFAULT_MCTS_SIMS,
     mcts_cpuct: float = 1.5,
+    dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    dirichlet_eps: float = DEFAULT_DIRICHLET_EPS,
+    mcts_temperature: float = DEFAULT_MCTS_TEMP,
+    mcts_temperature_moves: int = DEFAULT_MCTS_TEMP_MOVES,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     train_steps: int = DEFAULT_TRAIN_STEPS,
@@ -521,6 +567,10 @@ def train(
                     use_mcts=mcts_simulations > 0,
                     mcts_simulations=mcts_simulations,
                     mcts_cpuct=mcts_cpuct,
+                    dirichlet_alpha=dirichlet_alpha,
+                    dirichlet_eps=dirichlet_eps,
+                    mcts_temperature=mcts_temperature,
+                    mcts_temperature_moves=mcts_temperature_moves,
                     resign_threshold=resign_threshold,
                     resign_start=resign_start,
                     show_progress=show_progress,
@@ -627,8 +677,22 @@ if __name__ == "__main__":
     parser.add_argument("--komi", type=float, default=DEFAULT_KOMI, help="komi")
     parser.add_argument("--save-every", type=int, default=DEFAULT_SAVE_EVERY, help="save interval")
     parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP, help="sleep seconds per episode")
-    parser.add_argument("--mcts-sims", type=int, default=50, help="MCTS simulations per move (0 to disable)")
+    parser.add_argument(
+        "--mcts-sims",
+        type=int,
+        default=DEFAULT_MCTS_SIMS,
+        help="MCTS simulations per move (0 to disable)",
+    )
     parser.add_argument("--mcts-cpuct", type=float, default=1.5, help="MCTS exploration constant")
+    parser.add_argument("--dirichlet-alpha", type=float, default=DEFAULT_DIRICHLET_ALPHA, help="Dirichlet alpha")
+    parser.add_argument("--dirichlet-eps", type=float, default=DEFAULT_DIRICHLET_EPS, help="Dirichlet epsilon")
+    parser.add_argument("--mcts-temp", type=float, default=DEFAULT_MCTS_TEMP, help="MCTS temperature")
+    parser.add_argument(
+        "--mcts-temp-moves",
+        type=int,
+        default=DEFAULT_MCTS_TEMP_MOVES,
+        help="number of opening moves using temperature",
+    )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="replay buffer size")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="replay batch size")
     parser.add_argument("--train-steps", type=int, default=DEFAULT_TRAIN_STEPS, help="train steps per episode")
@@ -654,6 +718,10 @@ if __name__ == "__main__":
         sleep_time=args.sleep,
         mcts_simulations=args.mcts_sims,
         mcts_cpuct=args.mcts_cpuct,
+        dirichlet_alpha=args.dirichlet_alpha,
+        dirichlet_eps=args.dirichlet_eps,
+        mcts_temperature=args.mcts_temp,
+        mcts_temperature_moves=args.mcts_temp_moves,
         buffer_size=args.buffer_size,
         batch_size=args.batch_size,
         train_steps=args.train_steps,

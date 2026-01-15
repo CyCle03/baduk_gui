@@ -34,6 +34,10 @@ except Exception:
 GUI_KOMI = 6.5
 GUI_MAX_MOVES = 300
 GUI_PASS_WIN_THRESHOLD = 0.7
+GUI_MCTS_DIRICHLET_ALPHA = 0.03
+GUI_MCTS_DIRICHLET_EPS = 0.25
+GUI_MCTS_TEMP = 1.25
+GUI_MCTS_TEMP_MOVES = 30
 
 # ----------------------------
 # GUI (PyQt6)
@@ -217,6 +221,35 @@ def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return probs / total
 
 
+def _apply_temperature(probs: np.ndarray, temperature: float) -> np.ndarray:
+    if temperature <= 0:
+        return probs
+    if abs(temperature - 1.0) < 1e-6:
+        return probs
+    scaled = np.power(probs, 1.0 / temperature)
+    total = np.sum(scaled)
+    if total <= 0:
+        return probs
+    return scaled / total
+
+
+def _add_dirichlet_noise(
+    probs: np.ndarray, mask: np.ndarray, alpha: float, eps: float
+) -> np.ndarray:
+    if eps <= 0 or alpha <= 0:
+        return probs
+    legal_indices = np.flatnonzero(mask > 0)
+    if legal_indices.size == 0:
+        return probs
+    noise = np.random.dirichlet([alpha] * legal_indices.size)
+    mixed = probs.copy()
+    mixed[legal_indices] = (1.0 - eps) * probs[legal_indices] + eps * noise
+    total = np.sum(mixed)
+    if total <= 0:
+        return probs
+    return mixed / total
+
+
 def _clone_board(board: GoBoard) -> GoBoard:
     new_board = GoBoard(board.size)
     new_board.grid = [row[:] for row in board.grid]
@@ -292,7 +325,13 @@ def _expand_node(model, node: _MCTSNode, board: GoBoard) -> float:
     return value
 
 
-def _mcts_pick_move(model, board: GoBoard, num_simulations: int, cpuct: float) -> Tuple[int, int]:
+def _mcts_pick_move(
+    model,
+    board: GoBoard,
+    num_simulations: int,
+    cpuct: float,
+    use_exploration: bool,
+) -> Tuple[int, int]:
     if index_to_move is None:
         raise RuntimeError("rl_model helpers not available")
     root = _MCTSNode(1.0)
@@ -319,8 +358,27 @@ def _mcts_pick_move(model, board: GoBoard, num_simulations: int, cpuct: float) -
             n.value_sum += value
             value = -value
 
-    best_action = max(root.children.items(), key=lambda kv: kv[1].visit_count)[0]
-    return index_to_move(best_action, board.size)
+    action_size = board.size * board.size + 1
+    counts = np.zeros(action_size, dtype=np.float32)
+    for action_idx, child in root.children.items():
+        counts[action_idx] = child.visit_count
+    if not use_exploration:
+        best_action = max(root.children.items(), key=lambda kv: kv[1].visit_count)[0]
+        return index_to_move(best_action, board.size)
+    total = np.sum(counts)
+    if total <= 0:
+        mask = np.zeros_like(counts)
+        for action_idx in root.children.keys():
+            mask[action_idx] = 1.0
+        probs = mask / np.sum(mask)
+    else:
+        probs = counts / total
+        mask = (counts > 0).astype(np.float32)
+    probs = _add_dirichlet_noise(probs, mask, GUI_MCTS_DIRICHLET_ALPHA, GUI_MCTS_DIRICHLET_EPS)
+    if board.move_count() < GUI_MCTS_TEMP_MOVES:
+        probs = _apply_temperature(probs, GUI_MCTS_TEMP)
+    action_idx = int(np.random.choice(len(probs), p=probs))
+    return index_to_move(action_idx, board.size)
 
 
 def _estimate_win_prob(model, board: GoBoard) -> Optional[float]:
@@ -505,6 +563,17 @@ class MainWindow(QWidget):
         self.btn_sgf_play.setEnabled(active)
         self.sgf_speed.setEnabled(active)
 
+    def _ensure_policy_ai(self) -> bool:
+        if PolicyAI is None:
+            QMessageBox.information(self, "MCTS 불가", "TensorFlow를 사용할 수 없습니다.")
+            return False
+        if not os.path.exists(self.model_path):
+            QMessageBox.information(self, "MCTS 불가", "models/latest.keras 파일이 없습니다.")
+            return False
+        if not isinstance(self.ai, PolicyAI):
+            self.ai = self._make_ai()
+        return isinstance(self.ai, PolicyAI)
+
     def _should_pass_after_opponent(self) -> bool:
         if self.board.consecutive_passes != 1:
             return False
@@ -589,15 +658,19 @@ class MainWindow(QWidget):
             return
         if self._should_pass_after_opponent():
             mv = PASS_MOVE
-        elif self.use_mcts and isinstance(self.ai, PolicyAI):
-            try:
+        elif self.use_mcts:
+            if self._ensure_policy_ai():
+                try:
                 mv = _mcts_pick_move(
                     self.ai.model,
                     self.board,
                     self.mcts_simulations,
                     self.mcts_cpuct,
+                    self.ai_vs_ai,
                 )
-            except Exception:
+                except Exception:
+                    mv = self.ai.select_move(self.board)
+            else:
                 mv = self.ai.select_move(self.board)
         else:
             mv = self.ai.select_move(self.board)
@@ -675,6 +748,11 @@ class MainWindow(QWidget):
     def on_toggle_selfplay(self):
         self.ai_vs_ai = not self.ai_vs_ai
         self._update_selfplay_label()
+        if self.ai_vs_ai and self.use_mcts:
+            if not self._ensure_policy_ai():
+                self.use_mcts = False
+                self._update_mcts_label()
+                self._update_status()
         if (
             self.ai_vs_ai
             and self.board.consecutive_passes < 2
@@ -716,16 +794,7 @@ class MainWindow(QWidget):
             self._update_mcts_label()
             self._update_status()
             return
-        if PolicyAI is None:
-            QMessageBox.information(self, "MCTS 불가", "TensorFlow를 사용할 수 없습니다.")
-            return
-        if not os.path.exists(self.model_path):
-            QMessageBox.information(self, "MCTS 불가", "models/latest.keras 파일이 없습니다.")
-            return
-        if not isinstance(self.ai, PolicyAI):
-            self.ai = self._make_ai()
-        if not isinstance(self.ai, PolicyAI):
-            QMessageBox.information(self, "MCTS 불가", "정책 모델을 로드하지 못했습니다.")
+        if not self._ensure_policy_ai():
             return
         self.use_mcts = True
         self._update_mcts_label()

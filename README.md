@@ -40,6 +40,12 @@ AI pass behavior (GUI):
 - After the opponent passes, the AI will pass to end the game when its win
   probability is high enough (default threshold: `0.7`).
 
+MCTS + self-play note:
+- If MCTS is enabled, starting `AI vs AI` will keep MCTS active as long as the
+  policy model is available.
+- In self-play mode, MCTS adds Dirichlet noise and an opening temperature
+  (defaults: alpha `0.03`, eps `0.25`, temp `1.25`, first `30` moves).
+
 The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 
 ## Train (CLI)
@@ -189,6 +195,12 @@ GUI 종료 조건:
 AI 패스 동작(GUI):
 - 상대가 패스한 직후, 승리 확률이 충분히 높으면 패스해서 바로 종료합니다
   (기본 임계값: `0.7`).
+
+MCTS + 자가대국 참고:
+- MCTS가 켜져 있으면 `AI vs AI`를 시작할 때 정책 모델이 로드된 상태에서
+  계속 MCTS가 유지됩니다.
+- 자가대국 모드에서는 MCTS 루트 확률에 Dirichlet 노이즈와 초반 온도를
+  적용합니다(기본값: alpha `0.03`, eps `0.25`, temp `1.25`, 첫 `30`수).
 
 기본 최대 수: 300
 
