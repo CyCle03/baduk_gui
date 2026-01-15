@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import time
 from typing import List, Tuple
 
@@ -32,6 +33,7 @@ DEFAULT_VALUE_DELTA = 0.05
 DEFAULT_VALUE_MARGIN = 0.6
 DEFAULT_SLEEP = 0.0
 TRAIN_STATE_PATH = os.path.join(BASE_DIR, "train_state.json")
+TRAIN_STATE_BACKUP_PATH = os.path.join(MODEL_DIR, "train_state_backup.json")
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -83,6 +85,16 @@ def _save_train_state(path: str, data: dict) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=True, indent=2)
+    except OSError:
+        pass
+
+
+def _backup_train_state(src_path: str, backup_path: str) -> None:
+    if not os.path.exists(src_path):
+        return
+    try:
+        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+        shutil.copy2(src_path, backup_path)
     except OSError:
         pass
 
@@ -212,6 +224,7 @@ def train(
                 manager.save(checkpoint_number=episode)
                 _save_sgf(moves, score_diff, episode, board_size, komi, SGF_DIR)
                 _save_train_state(TRAIN_STATE_PATH, train_state)
+                _backup_train_state(TRAIN_STATE_PATH, TRAIN_STATE_BACKUP_PATH)
 
             episode_time = time.perf_counter() - episode_start
             total_time = time.perf_counter() - start_time
@@ -238,6 +251,7 @@ def train(
             model.save(checkpoint_path)
             manager.save(checkpoint_number=last_episode)
             _save_train_state(TRAIN_STATE_PATH, train_state)
+            _backup_train_state(TRAIN_STATE_PATH, TRAIN_STATE_BACKUP_PATH)
 
 
 if __name__ == "__main__":

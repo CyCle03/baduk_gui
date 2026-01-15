@@ -452,6 +452,7 @@ class MainWindow(QWidget):
             self._train_process.terminate()
             self._model_reload_timer.stop()
             self.train_running = False
+            self.last_train_status = "중지됨"
             self._update_train_label()
             self._update_status()
             return
