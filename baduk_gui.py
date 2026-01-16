@@ -235,9 +235,31 @@ def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return probs / total
 
 
+def _is_true_eye_region(board: GoBoard, region: List[Tuple[int, int]], color: int) -> bool:
+    size = board.size
+    opp = opponent(color)
+    for x, y in region:
+        diagonals = [
+            (x - 1, y - 1),
+            (x + 1, y - 1),
+            (x - 1, y + 1),
+            (x + 1, y + 1),
+        ]
+        for dx, dy in diagonals:
+            if not in_bounds(size, dx, dy):
+                continue
+            if board.get(dx, dy) == opp:
+                return False
+    return True
+
+
 def _score_area_with_dead(board: GoBoard, komi: float) -> Tuple[float, int, int]:
     size = board.size
     territory_owner: Dict[Tuple[int, int], int] = {}
+    region_id_map: Dict[Tuple[int, int], int] = {}
+    region_bordering: Dict[int, set] = {}
+    region_cells: Dict[int, List[Tuple[int, int]]] = {}
+    region_id = 0
     visited = set()
     black_territory = 0
     white_territory = 0
@@ -273,6 +295,10 @@ def _score_area_with_dead(board: GoBoard, komi: float) -> Tuple[float, int, int]
                 white_territory += len(region)
             for pos in region:
                 territory_owner[pos] = owner
+                region_id_map[pos] = region_id
+            region_bordering[region_id] = bordering
+            region_cells[region_id] = region
+            region_id += 1
 
     stone_visited = set()
     black_stones = 0
@@ -297,6 +323,7 @@ def _score_area_with_dead(board: GoBoard, komi: float) -> Tuple[float, int, int]
                         stack.append((nx, ny))
 
             opp = opponent(color)
+            eye_regions = set()
             dead = True
             for gx, gy in group:
                 for nx, ny in neighbors(size, gx, gy):
@@ -305,9 +332,17 @@ def _score_area_with_dead(board: GoBoard, komi: float) -> Tuple[float, int, int]
                     owner = territory_owner.get((nx, ny), EMPTY)
                     if owner != opp:
                         dead = False
-                        break
-                if not dead:
+                    rid = region_id_map.get((nx, ny))
+                    if (
+                        rid is not None
+                        and region_bordering.get(rid) == {color}
+                        and _is_true_eye_region(board, region_cells.get(rid, []), color)
+                    ):
+                        eye_regions.add(rid)
+                if not dead and len(eye_regions) >= 2:
                     break
+            if len(eye_regions) >= 2:
+                dead = False
             if dead:
                 if color == BLACK:
                     black_dead += len(group)

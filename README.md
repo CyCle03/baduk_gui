@@ -50,6 +50,8 @@ MCTS + self-play note:
 
 The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 GUI writes per-game results to `logs/gui_log.csv`.
+GUI score estimation uses area scoring plus a simple dead-stone heuristic:
+- A group must have at least two true eyes (diagonal checks) to be considered alive.
 
 ## Train (CLI)
 
@@ -69,6 +71,7 @@ Optional flags:
 - `--train-steps 1`
 - `--resign-threshold 0.98`
 - `--resign-start 150`
+- `--resign-score-check-moves 30` (skip resign near the end when area score favors current player)
 - `--data-dir ./data`
 - `--selfplay-only`
 - `--train-only`
@@ -148,6 +151,8 @@ python3 -m venv .venv
 
 GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영합니다.
 GUI 대국 결과는 `logs/gui_log.csv`에 기록됩니다.
+GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합니다:
+- 두 눈(대각선 검사 포함)을 만족해야 생존으로 판단합니다.
 
 ### CLI 학습
 
@@ -167,6 +172,7 @@ GUI 대국 결과는 `logs/gui_log.csv`에 기록됩니다.
 - `--train-steps 1`
 - `--resign-threshold 0.98`
 - `--resign-start 150`
+- `--resign-score-check-moves 30` (막판 계가가 유리하면 기권을 건너뜀)
 - `--data-dir ./data`
 - `--selfplay-only`
 - `--train-only`

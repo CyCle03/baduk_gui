@@ -46,6 +46,7 @@ DEFAULT_MCTS_TEMP = 1.25
 DEFAULT_MCTS_TEMP_MOVES = 30
 DEFAULT_RESIGN_THRESHOLD = 0.98
 DEFAULT_RESIGN_START = 150
+DEFAULT_RESIGN_SCORE_CHECK_MOVES = 30
 DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 TRAIN_STATE_PATH = os.path.join(BASE_DIR, "train_state.json")
 TRAIN_STATE_BACKUP_PATH = os.path.join(MODEL_DIR, "train_state_backup.json")
@@ -411,6 +412,7 @@ def play_episode(
     mcts_temperature_moves: int = DEFAULT_MCTS_TEMP_MOVES,
     resign_threshold: float = DEFAULT_RESIGN_THRESHOLD,
     resign_start: int = DEFAULT_RESIGN_START,
+    resign_score_check_moves: int = DEFAULT_RESIGN_SCORE_CHECK_MOVES,
     show_progress: bool = False,
 ) -> Tuple[
     np.ndarray,
@@ -464,9 +466,18 @@ def play_episode(
             action_idx, value = sample_action(model, board, mask)
 
         if resign_threshold > 0 and move_count >= resign_start and value <= -resign_threshold:
-            resigned = True
-            resign_player = board.to_play
-            break
+            skip_resign = False
+            if move_count >= max_moves - resign_score_check_moves:
+                score_diff = board.score_area(komi=komi)
+                result_black = 1.0 if score_diff > 0 else -1.0
+                if (board.to_play == BLACK and result_black > 0) or (
+                    board.to_play == WHITE and result_black < 0
+                ):
+                    skip_resign = True
+            if not skip_resign:
+                resigned = True
+                resign_player = board.to_play
+                break
         recent_values.append(value)
         if len(recent_values) > value_window:
             recent_values.pop(0)
@@ -533,6 +544,7 @@ def train(
     train_steps: int = DEFAULT_TRAIN_STEPS,
     resign_threshold: float = DEFAULT_RESIGN_THRESHOLD,
     resign_start: int = DEFAULT_RESIGN_START,
+    resign_score_check_moves: int = DEFAULT_RESIGN_SCORE_CHECK_MOVES,
     data_dir: str = DEFAULT_DATA_DIR,
     selfplay_only: bool = False,
     train_only: bool = False,
@@ -624,6 +636,7 @@ def train(
                     mcts_temperature_moves=mcts_temperature_moves,
                     resign_threshold=resign_threshold,
                     resign_start=resign_start,
+                    resign_score_check_moves=resign_score_check_moves,
                     show_progress=show_progress,
                 )
                 buffer.add(states, actions, policy_targets, rewards, value_targets)
@@ -773,6 +786,12 @@ if __name__ == "__main__":
     parser.add_argument("--train-steps", type=int, default=DEFAULT_TRAIN_STEPS, help="train steps per episode")
     parser.add_argument("--resign-threshold", type=float, default=DEFAULT_RESIGN_THRESHOLD, help="resign threshold")
     parser.add_argument("--resign-start", type=int, default=DEFAULT_RESIGN_START, help="min moves before resign")
+    parser.add_argument(
+        "--resign-score-check-moves",
+        type=int,
+        default=DEFAULT_RESIGN_SCORE_CHECK_MOVES,
+        help="skip resign check for last N moves when area score favors current player",
+    )
     parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR, help="self-play data directory")
     parser.add_argument("--selfplay-only", action="store_true", help="generate self-play data only")
     parser.add_argument("--train-only", action="store_true", help="train from data directory only")
@@ -804,6 +823,7 @@ if __name__ == "__main__":
         train_steps=args.train_steps,
         resign_threshold=args.resign_threshold,
         resign_start=args.resign_start,
+        resign_score_check_moves=args.resign_score_check_moves,
         data_dir=args.data_dir,
         selfplay_only=args.selfplay_only,
         train_only=args.train_only,

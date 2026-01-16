@@ -33,6 +33,23 @@ def neighbors(n: int, x: int, y: int):
         yield (x, y + 1)
 
 
+def _is_true_eye_region(board: "GoBoard", region: List[Tuple[int, int]], color: int) -> bool:
+    opp = opponent(color)
+    for x, y in region:
+        diagonals = [
+            (x - 1, y - 1),
+            (x + 1, y - 1),
+            (x - 1, y + 1),
+            (x + 1, y + 1),
+        ]
+        for dx, dy in diagonals:
+            if not in_bounds(board.size, dx, dy):
+                continue
+            if board.get(dx, dy) == opp:
+                return False
+    return True
+
+
 class IllegalMove(Exception):
     pass
 
@@ -265,6 +282,10 @@ class GoBoard:
         white_stones = 0
         black_territory = 0
         white_territory = 0
+        region_id_map = {}
+        region_bordering = {}
+        region_cells = {}
+        region_id = 0
         visited = set()
 
         for y in range(self.size):
@@ -300,9 +321,64 @@ class GoBoard:
                     black_territory += len(region)
                 elif bordering == {WHITE}:
                     white_territory += len(region)
+                for pos in region:
+                    region_id_map[pos] = region_id
+                region_bordering[region_id] = bordering
+                region_cells[region_id] = region
+                region_id += 1
 
-        black_score = black_stones + black_territory
-        white_score = white_stones + white_territory + komi
+        stone_visited = set()
+        black_dead = 0
+        white_dead = 0
+        for y in range(self.size):
+            for x in range(self.size):
+                color = self.get(x, y)
+                if color == EMPTY or (x, y) in stone_visited:
+                    continue
+                group = []
+                stack = [(x, y)]
+                stone_visited.add((x, y))
+                while stack:
+                    cx, cy = stack.pop()
+                    group.append((cx, cy))
+                    for nx, ny in neighbors(self.size, cx, cy):
+                        if self.get(nx, ny) == color and (nx, ny) not in stone_visited:
+                            stone_visited.add((nx, ny))
+                            stack.append((nx, ny))
+
+                opp = opponent(color)
+                eye_regions = set()
+                dead = True
+                for gx, gy in group:
+                    for nx, ny in neighbors(self.size, gx, gy):
+                        if self.get(nx, ny) != EMPTY:
+                            continue
+                        if region_bordering.get(region_id_map.get((nx, ny))) != {color}:
+                            dead = False
+                        rid = region_id_map.get((nx, ny))
+                        if (
+                            rid is not None
+                            and region_bordering.get(rid) == {color}
+                            and _is_true_eye_region(self, region_cells.get(rid, []), color)
+                        ):
+                            eye_regions.add(rid)
+                    if not dead and len(eye_regions) >= 2:
+                        break
+                if len(eye_regions) >= 2:
+                    dead = False
+                if dead:
+                    if color == BLACK:
+                        black_dead += len(group)
+                    else:
+                        white_dead += len(group)
+                else:
+                    if color == BLACK:
+                        black_stones += len(group)
+                    else:
+                        white_stones += len(group)
+
+        black_score = black_stones + black_territory + white_dead
+        white_score = white_stones + white_territory + black_dead + komi
         return black_score - white_score
 
 
