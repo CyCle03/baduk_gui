@@ -30,6 +30,7 @@ DEFAULT_MAX_MOVES = 300
 DEFAULT_KOMI = 6.5
 DEFAULT_LEARNING_RATE = 1e-4
 DEFAULT_PASS_START = 300
+DEFAULT_PASS_MIN_MOVES = 150
 DEFAULT_VALUE_WINDOW = 20
 DEFAULT_VALUE_DELTA = 0.05
 DEFAULT_VALUE_MARGIN = 0.6
@@ -370,9 +371,10 @@ def _mcts_search(
     return counts, root_value
 
 
-def sample_action(model: tf.keras.Model, board: GoBoard) -> Tuple[int, float]:
+def sample_action(model: tf.keras.Model, board: GoBoard, mask: Optional[np.ndarray] = None) -> Tuple[int, float]:
     state = encode_board(board)
-    mask = legal_moves_mask(board)
+    if mask is None:
+        mask = legal_moves_mask(board)
     logits, value = model(state[None, ...], training=False)
     logits = logits.numpy()[0]
     value = float(value.numpy()[0][0])
@@ -394,6 +396,7 @@ def play_episode(
     komi: float,
     max_moves: int = DEFAULT_MAX_MOVES,
     pass_start: int = DEFAULT_PASS_START,
+    pass_min_moves: int = DEFAULT_PASS_MIN_MOVES,
     value_window: int = DEFAULT_VALUE_WINDOW,
     value_delta: float = DEFAULT_VALUE_DELTA,
     value_margin: float = DEFAULT_VALUE_MARGIN,
@@ -429,6 +432,7 @@ def play_episode(
     resign_player = None
     while board.consecutive_passes < 2 and move_count < max_moves:
         state = encode_board(board)
+        pass_allowed = move_count >= pass_min_moves
         maybe_policy = None
         if use_mcts and mcts_simulations > 0:
             probs, value = _mcts_search(
@@ -440,13 +444,22 @@ def play_episode(
                 max_moves,
             )
             mask = legal_moves_mask(board)
+            if not pass_allowed:
+                mask[move_to_index(PASS_MOVE, board.size)] = 0.0
             probs = _add_dirichlet_noise(probs, mask, dirichlet_alpha, dirichlet_eps)
             if move_count < mcts_temperature_moves:
                 probs = _apply_temperature(probs, mcts_temperature)
+            probs = probs * mask
+            total = np.sum(probs)
+            if total > 0:
+                probs = probs / total
             maybe_policy = probs
             action_idx = int(np.random.choice(len(probs), p=probs))
         else:
-            action_idx, value = sample_action(model, board)
+            mask = legal_moves_mask(board)
+            if not pass_allowed:
+                mask[move_to_index(PASS_MOVE, board.size)] = 0.0
+            action_idx, value = sample_action(model, board, mask)
 
         if resign_threshold > 0 and move_count >= resign_start and value <= -resign_threshold:
             resigned = True
@@ -463,7 +476,7 @@ def play_episode(
         )
         should_pass = stable and abs(value) >= value_margin
 
-        if should_pass:
+        if should_pass and pass_allowed:
             action_idx = move_to_index(PASS_MOVE, board.size)
         if maybe_policy is not None:
             policy_targets.append(maybe_policy)
@@ -508,6 +521,7 @@ def train(
     sleep_time: float = DEFAULT_SLEEP,
     mcts_simulations: int = DEFAULT_MCTS_SIMS,
     mcts_cpuct: float = 1.5,
+    pass_min_moves: int = DEFAULT_PASS_MIN_MOVES,
     dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
     dirichlet_eps: float = DEFAULT_DIRICHLET_EPS,
     mcts_temperature: float = DEFAULT_MCTS_TEMP,
@@ -570,6 +584,7 @@ def train(
                     use_mcts=mcts_simulations > 0,
                     mcts_simulations=mcts_simulations,
                     mcts_cpuct=mcts_cpuct,
+                    pass_min_moves=pass_min_moves,
                     dirichlet_alpha=dirichlet_alpha,
                     dirichlet_eps=dirichlet_eps,
                     mcts_temperature=mcts_temperature,
@@ -687,6 +702,12 @@ if __name__ == "__main__":
         help="MCTS simulations per move (0 to disable)",
     )
     parser.add_argument("--mcts-cpuct", type=float, default=1.5, help="MCTS exploration constant")
+    parser.add_argument(
+        "--pass-min-moves",
+        type=int,
+        default=DEFAULT_PASS_MIN_MOVES,
+        help="minimum moves before pass is allowed",
+    )
     parser.add_argument("--dirichlet-alpha", type=float, default=DEFAULT_DIRICHLET_ALPHA, help="Dirichlet alpha")
     parser.add_argument("--dirichlet-eps", type=float, default=DEFAULT_DIRICHLET_EPS, help="Dirichlet epsilon")
     parser.add_argument("--mcts-temp", type=float, default=DEFAULT_MCTS_TEMP, help="MCTS temperature")
@@ -721,6 +742,7 @@ if __name__ == "__main__":
         sleep_time=args.sleep,
         mcts_simulations=args.mcts_sims,
         mcts_cpuct=args.mcts_cpuct,
+        pass_min_moves=args.pass_min_moves,
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_eps=args.dirichlet_eps,
         mcts_temperature=args.mcts_temp,

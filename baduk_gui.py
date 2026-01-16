@@ -1,8 +1,10 @@
 import math
+import random
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Tuple
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QProcess
@@ -36,10 +38,17 @@ except Exception:
 GUI_KOMI = 6.5
 GUI_MAX_MOVES = 300
 GUI_PASS_WIN_THRESHOLD = 0.7
+GUI_PASS_MIN_MOVES = 150
 GUI_MCTS_DIRICHLET_ALPHA = 0.03
 GUI_MCTS_DIRICHLET_EPS = 0.25
 GUI_MCTS_TEMP = 1.25
 GUI_MCTS_TEMP_MOVES = 30
+GUI_PASS_START = 300
+GUI_VALUE_WINDOW = 20
+GUI_VALUE_DELTA = 0.05
+GUI_VALUE_MARGIN = 0.6
+GUI_RESIGN_THRESHOLD = 0.98
+GUI_RESIGN_START = 150
 
 # ----------------------------
 # GUI (PyQt6)
@@ -422,11 +431,12 @@ def _mcts_pick_move(
     num_simulations: int,
     cpuct: float,
     use_exploration: bool,
-) -> Tuple[int, int]:
+    pass_allowed: bool,
+) -> Tuple[Tuple[int, int], float]:
     if index_to_move is None:
         raise RuntimeError("rl_model helpers not available")
     root = _MCTSNode(1.0)
-    _expand_node(model, root, board)
+    root_value = _expand_node(model, root, board)
 
     for _ in range(num_simulations):
         node = root
@@ -453,9 +463,14 @@ def _mcts_pick_move(
     counts = np.zeros(action_size, dtype=np.float32)
     for action_idx, child in root.children.items():
         counts[action_idx] = child.visit_count
+    if not pass_allowed:
+        counts[board.size * board.size] = 0.0
     if not use_exploration:
-        best_action = max(root.children.items(), key=lambda kv: kv[1].visit_count)[0]
-        return index_to_move(best_action, board.size)
+        items = root.children.items()
+        if not pass_allowed:
+            items = [(k, v) for k, v in items if k != board.size * board.size]
+        best_action = max(items, key=lambda kv: kv[1].visit_count)[0]
+        return index_to_move(best_action, board.size), root_value
     total = np.sum(counts)
     if total <= 0:
         mask = np.zeros_like(counts)
@@ -469,7 +484,7 @@ def _mcts_pick_move(
     if board.move_count() < GUI_MCTS_TEMP_MOVES:
         probs = _apply_temperature(probs, GUI_MCTS_TEMP)
     action_idx = int(np.random.choice(len(probs), p=probs))
-    return index_to_move(action_idx, board.size)
+    return index_to_move(action_idx, board.size), root_value
 
 
 def _estimate_win_prob(model, board: GoBoard) -> Optional[float]:
@@ -481,6 +496,31 @@ def _estimate_win_prob(model, board: GoBoard) -> Optional[float]:
         return None
     value = float(outputs[1].numpy()[0][0])
     return 0.5 * (value + 1.0)
+
+
+def _estimate_value(model, board: GoBoard) -> Optional[float]:
+    if encode_board is None:
+        return None
+    state = encode_board(board)
+    outputs = model(state[None, ...], training=False)
+    if not isinstance(outputs, (list, tuple)) or len(outputs) < 2:
+        return None
+    return float(outputs[1].numpy()[0][0])
+
+
+def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
+    if isinstance(ai, PolicyAI) and encode_board is not None and legal_moves_mask is not None:
+        state = encode_board(board)
+        mask = legal_moves_mask(board)
+        mask[board.size * board.size] = 0.0
+        logits, _value = ai.model(state[None, ...], training=False)
+        probs = _masked_softmax(logits.numpy()[0], mask)
+        idx = int(np.random.choice(len(probs), p=probs))
+        return index_to_move(idx, board.size)
+    legal_non_pass = [m for m in board.legal_moves() if m != PASS_MOVE]
+    if legal_non_pass:
+        return random.choice(legal_non_pass)
+    return PASS_MOVE
 
 
 class MainWindow(QWidget):
@@ -504,6 +544,7 @@ class MainWindow(QWidget):
         self.sgf_mode = False
         self.sgf_moves: List[Tuple[int, Tuple[int, int]]] = []
         self.sgf_index = 0
+        self._recent_values: Deque[float] = deque(maxlen=GUI_VALUE_WINDOW)
 
         self.status = QLabel()
         self.status.setFont(pick_korean_font(12))
@@ -668,6 +709,8 @@ class MainWindow(QWidget):
     def _should_pass_after_opponent(self) -> bool:
         if self.board.consecutive_passes != 1:
             return False
+        if self.ai_vs_ai:
+            return False
         if PolicyAI is None:
             return False
         if not isinstance(self.ai, PolicyAI):
@@ -679,6 +722,33 @@ class MainWindow(QWidget):
         if win_prob is None:
             return False
         return win_prob >= GUI_PASS_WIN_THRESHOLD
+
+    def _should_resign_selfplay(self, value: float) -> bool:
+        if not self.ai_vs_ai:
+            return False
+        if self.board.move_count() < GUI_RESIGN_START:
+            return False
+        return value <= -GUI_RESIGN_THRESHOLD
+
+    def _should_pass_selfplay(self, value: float, pass_allowed: bool) -> bool:
+        if not self.ai_vs_ai or not pass_allowed:
+            return False
+        if self.board.move_count() < GUI_PASS_START:
+            return False
+        if len(self._recent_values) < GUI_VALUE_WINDOW:
+            return False
+        stable = max(self._recent_values) - min(self._recent_values) <= GUI_VALUE_DELTA
+        return stable and abs(value) >= GUI_VALUE_MARGIN
+
+    def _show_resign(self, resign_player: int):
+        winner = "백" if resign_player == BLACK else "흑"
+        self.game_over_shown = True
+        QMessageBox.information(
+            self,
+            "게임 종료(임시)",
+            f"기권으로 {winner} 승.\n"
+            "사석 추정 포함 자동 계산입니다.",
+        )
 
     def _maybe_game_end(self):
         is_pass_end = self.board.consecutive_passes >= 2
@@ -749,24 +819,36 @@ class MainWindow(QWidget):
             return
         if self.board.to_play == BLACK and not self.ai_vs_ai:
             return
+        pass_allowed = not self.ai_vs_ai or self.board.move_count() >= GUI_PASS_MIN_MOVES
+        mv = None
+        value = None
+        if self.use_mcts and self._ensure_policy_ai():
+            try:
+                mv, value = _mcts_pick_move(
+                    self.ai.model,
+                    self.board,
+                    self.mcts_simulations,
+                    self.mcts_cpuct,
+                    self.ai_vs_ai,
+                    pass_allowed,
+                )
+            except Exception:
+                mv = None
+        if mv is None:
+            if self.ai_vs_ai and isinstance(self.ai, PolicyAI):
+                value = _estimate_value(self.ai.model, self.board)
+            mv = self.ai.select_move(self.board)
+        if self.ai_vs_ai and value is not None:
+            if self._should_resign_selfplay(value):
+                self._show_resign(self.board.to_play)
+                return
+            self._recent_values.append(value)
+            if self._should_pass_selfplay(value, pass_allowed):
+                mv = PASS_MOVE
         if self._should_pass_after_opponent():
             mv = PASS_MOVE
-        elif self.use_mcts:
-            if self._ensure_policy_ai():
-                try:
-                    mv = _mcts_pick_move(
-                        self.ai.model,
-                        self.board,
-                        self.mcts_simulations,
-                        self.mcts_cpuct,
-                        self.ai_vs_ai,
-                    )
-                except Exception:
-                    mv = self.ai.select_move(self.board)
-            else:
-                mv = self.ai.select_move(self.board)
-        else:
-            mv = self.ai.select_move(self.board)
+        if not pass_allowed and mv == PASS_MOVE:
+            mv = _pick_non_pass_move(self.ai, self.board)
         self.board.play(mv[0], mv[1])
         self.last_move = None if mv == PASS_MOVE else (mv[0], mv[1])
         self.board_widget.last_move = self.last_move
@@ -804,6 +886,7 @@ class MainWindow(QWidget):
         self.last_move = None
         self.board_widget.last_move = None
         self.game_over_shown = False
+        self._recent_values.clear()
         self._update_status()
         self.board_widget.update()
 
@@ -815,6 +898,7 @@ class MainWindow(QWidget):
         self.last_move = None
         self.board_widget.last_move = None
         self.game_over_shown = False
+        self._recent_values.clear()
         self._update_status()
         self.board_widget.update()
         if self.ai_vs_ai:
@@ -975,6 +1059,7 @@ class MainWindow(QWidget):
         self.last_move = None
         self.board_widget.last_move = None
         self.game_over_shown = False
+        self._recent_values.clear()
         self._update_sgf_controls()
         self._update_status()
         self.board_widget.update()

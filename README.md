@@ -45,6 +45,8 @@ MCTS + self-play note:
   policy model is available.
 - In self-play mode, MCTS adds Dirichlet noise and an opening temperature
   (defaults: alpha `0.03`, eps `0.25`, temp `1.25`, first `30` moves).
+- In self-play mode, resign checks start at move 150 and PASS is blocked before
+  move 150 to match CLI defaults.
 
 The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 
@@ -201,6 +203,8 @@ MCTS + 자가대국 참고:
   계속 MCTS가 유지됩니다.
 - 자가대국 모드에서는 MCTS 루트 확률에 Dirichlet 노이즈와 초반 온도를
   적용합니다(기본값: alpha `0.03`, eps `0.25`, temp `1.25`, 첫 `30`수).
+- 자가대국 모드에서는 150수 이전 패스를 막고, 150수부터 기권 판단을
+  시작하도록 CLI 기본값에 맞췄습니다.
 
 기본 최대 수: 300
 
