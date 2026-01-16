@@ -1,8 +1,10 @@
+import csv
 import math
 import random
 import os
 import re
 import sys
+import time
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -49,6 +51,7 @@ GUI_VALUE_DELTA = 0.05
 GUI_VALUE_MARGIN = 0.6
 GUI_RESIGN_THRESHOLD = 0.98
 GUI_RESIGN_START = 150
+GUI_LOG_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "gui_log.csv")
 
 # ----------------------------
 # GUI (PyQt6)
@@ -545,6 +548,8 @@ class MainWindow(QWidget):
         self.sgf_moves: List[Tuple[int, Tuple[int, int]]] = []
         self.sgf_index = 0
         self._recent_values: Deque[float] = deque(maxlen=GUI_VALUE_WINDOW)
+        self._gui_log = None
+        self._gui_log_writer = None
 
         self.status = QLabel()
         self.status.setFont(pick_korean_font(12))
@@ -650,6 +655,7 @@ class MainWindow(QWidget):
         self._sgf_play_timer = QTimer(self)
         self._sgf_play_timer.setInterval(self.sgf_speed.value())
         self._sgf_play_timer.timeout.connect(self._sgf_play_step)
+        self._setup_gui_log()
         
 
     def _make_ai(self):
@@ -740,6 +746,45 @@ class MainWindow(QWidget):
         stable = max(self._recent_values) - min(self._recent_values) <= GUI_VALUE_DELTA
         return stable and abs(value) >= GUI_VALUE_MARGIN
 
+    def _setup_gui_log(self):
+        try:
+            os.makedirs(os.path.dirname(GUI_LOG_CSV), exist_ok=True)
+            self._gui_log = open(GUI_LOG_CSV, "a", encoding="utf-8", newline="")
+            self._gui_log_writer = csv.DictWriter(
+                self._gui_log,
+                fieldnames=[
+                    "timestamp",
+                    "mode",
+                    "mcts",
+                    "mcts_sims",
+                    "moves",
+                    "score_diff",
+                    "reason",
+                ],
+            )
+            if self._gui_log.tell() == 0:
+                self._gui_log_writer.writeheader()
+                self._gui_log.flush()
+        except OSError:
+            self._gui_log = None
+            self._gui_log_writer = None
+
+    def _log_gui_game(self, score_diff: float, reason: str):
+        if self._gui_log_writer is None:
+            return
+        self._gui_log_writer.writerow(
+            {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "mode": "AI vs AI" if self.ai_vs_ai else "Human vs AI",
+                "mcts": "on" if self.use_mcts else "off",
+                "mcts_sims": self.mcts_simulations,
+                "moves": self.board.move_count(),
+                "score_diff": f"{score_diff:.1f}",
+                "reason": reason,
+            }
+        )
+        self._gui_log.flush()
+
     def _show_resign(self, resign_player: int):
         winner = "백" if resign_player == BLACK else "흑"
         self.game_over_shown = True
@@ -749,6 +794,8 @@ class MainWindow(QWidget):
             f"기권으로 {winner} 승.\n"
             "사석 추정 포함 자동 계산입니다.",
         )
+        score_diff = -1.0 if resign_player == BLACK else 1.0
+        self._log_gui_game(score_diff, "기권")
 
     def _maybe_game_end(self):
         is_pass_end = self.board.consecutive_passes >= 2
@@ -767,6 +814,7 @@ class MainWindow(QWidget):
                 f"{dead_info}\n"
                 "사석 추정 포함 자동 계산입니다."
             )
+            self._log_gui_game(score_diff, reason)
 
     def on_human_move(self, x: int, y: int):
         # Human is always black in this MVP
@@ -1181,7 +1229,10 @@ def main():
     app.setFont(pick_korean_font(12))
     w = MainWindow()
     w.show()
-    sys.exit(app.exec())
+    rc = app.exec()
+    if w._gui_log is not None:
+        w._gui_log.close()
+    sys.exit(rc)
 
 if __name__ == "__main__":
     main()

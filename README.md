@@ -49,6 +49,7 @@ MCTS + self-play note:
   move 150 to match CLI defaults.
 
 The GUI auto-reloads the model every 10 seconds to reflect CLI training.
+GUI writes per-game results to `logs/gui_log.csv`.
 
 ## Train (CLI)
 
@@ -73,6 +74,7 @@ Optional flags:
 - `--train-only`
 - `--save-selfplay`
 - `--max-data-files 0`
+- `--log-csv logs/train_log.csv` (CSV log file; use empty string to disable)
 - `--progress` / `--no-progress`
 
 Models are saved to:
@@ -145,6 +147,7 @@ python3 -m venv .venv
 - `SGF Speed (ms)`: 재생 속도 조절
 
 GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영합니다.
+GUI 대국 결과는 `logs/gui_log.csv`에 기록됩니다.
 
 ### CLI 학습
 
@@ -169,6 +172,7 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 - `--train-only`
 - `--save-selfplay`
 - `--max-data-files 0`
+- `--log-csv logs/train_log.csv` (CSV 로그 파일, 비활성화하려면 빈 문자열)
 - `--progress` / `--no-progress`
 
 모델 저장 위치:

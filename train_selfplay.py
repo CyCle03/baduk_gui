@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import math
 import os
@@ -48,6 +49,7 @@ DEFAULT_RESIGN_START = 150
 DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 TRAIN_STATE_PATH = os.path.join(BASE_DIR, "train_state.json")
 TRAIN_STATE_BACKUP_PATH = os.path.join(MODEL_DIR, "train_state_backup.json")
+DEFAULT_LOG_CSV = os.path.join(BASE_DIR, "logs", "train_log.csv")
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -537,6 +539,7 @@ def train(
     save_selfplay: bool = False,
     max_data_files: Optional[int] = None,
     show_progress: bool = True,
+    log_csv: Optional[str] = DEFAULT_LOG_CSV,
 ):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -556,6 +559,36 @@ def train(
     recent_times: List[float] = []
     use_policy_targets = mcts_simulations > 0
     buffer = ReplayBuffer(buffer_size, use_policy_targets=use_policy_targets)
+    csv_writer = None
+    csv_file = None
+
+    if log_csv:
+        try:
+            os.makedirs(os.path.dirname(log_csv), exist_ok=True)
+            csv_file = open(log_csv, "a", encoding="utf-8", newline="")
+            csv_writer = csv.DictWriter(
+                csv_file,
+                fieldnames=[
+                    "episode",
+                    "loss",
+                    "policy",
+                    "value",
+                    "score_diff",
+                    "moves",
+                    "episode_time",
+                    "total_time",
+                    "avg_time",
+                    "recent10_avg",
+                ],
+            )
+            if csv_file.tell() == 0:
+                csv_writer.writeheader()
+                csv_file.flush()
+        except OSError:
+            csv_writer = None
+            if csv_file is not None:
+                csv_file.close()
+                csv_file = None
 
     if selfplay_only and train_only:
         print("selfplay-only and train-only cannot be used together.")
@@ -673,12 +706,30 @@ def train(
                 f"episode_time={episode_time:.2f}s total_time={total_time:.2f}s "
                 f"avg_time={avg_time:.2f}s recent10_avg={recent_avg:.2f}s"
             )
+            if csv_writer is not None:
+                csv_writer.writerow(
+                    {
+                        "episode": episode,
+                        "loss": f"{loss.numpy():.4f}",
+                        "policy": f"{policy_loss.numpy():.4f}",
+                        "value": f"{value_loss.numpy():.4f}",
+                        "score_diff": f"{score_diff:.1f}",
+                        "moves": len(actions),
+                        "episode_time": f"{episode_time:.2f}",
+                        "total_time": f"{total_time:.2f}",
+                        "avg_time": f"{avg_time:.2f}",
+                        "recent10_avg": f"{recent_avg:.2f}",
+                    }
+                )
+                csv_file.flush()
 
             if sleep_time > 0:
                 time.sleep(sleep_time)
     except KeyboardInterrupt:
         print("Interrupted: saving latest model...")
     finally:
+        if csv_file is not None:
+            csv_file.close()
         if last_episode > 0:
             model.save(MODEL_PATH)
             checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{last_episode:06d}.keras")
@@ -727,6 +778,7 @@ if __name__ == "__main__":
     parser.add_argument("--train-only", action="store_true", help="train from data directory only")
     parser.add_argument("--save-selfplay", action="store_true", help="save self-play data while training")
     parser.add_argument("--max-data-files", type=int, default=0, help="max data files to load")
+    parser.add_argument("--log-csv", type=str, default=DEFAULT_LOG_CSV, help="CSV log path (empty to disable)")
     parser.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
@@ -758,4 +810,5 @@ if __name__ == "__main__":
         save_selfplay=args.save_selfplay,
         max_data_files=args.max_data_files if args.max_data_files > 0 else None,
         show_progress=args.progress,
+        log_csv=args.log_csv if args.log_csv else None,
     )

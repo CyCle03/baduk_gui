@@ -9,3 +9,4 @@ sgf/
 *.ckpt
 data/
 *.npz
+logs/
