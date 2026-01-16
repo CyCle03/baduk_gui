@@ -429,6 +429,7 @@ def play_episode(
     resign_player = None
     while board.consecutive_passes < 2 and move_count < max_moves:
         state = encode_board(board)
+        maybe_policy = None
         if use_mcts and mcts_simulations > 0:
             probs, value = _mcts_search(
                 model,
@@ -442,7 +443,7 @@ def play_episode(
             probs = _add_dirichlet_noise(probs, mask, dirichlet_alpha, dirichlet_eps)
             if move_count < mcts_temperature_moves:
                 probs = _apply_temperature(probs, mcts_temperature)
-            policy_targets.append(probs)
+            maybe_policy = probs
             action_idx = int(np.random.choice(len(probs), p=probs))
         else:
             action_idx, value = sample_action(model, board)
@@ -464,6 +465,8 @@ def play_episode(
 
         if should_pass:
             action_idx = move_to_index(PASS_MOVE, board.size)
+        if maybe_policy is not None:
+            policy_targets.append(maybe_policy)
         states.append(state)
         actions.append(action_idx)
         players.append(board.to_play)
