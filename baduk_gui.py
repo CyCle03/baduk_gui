@@ -65,9 +65,12 @@ class BoardWidget(QWidget):
         self.setMinimumSize(760, 760)
         self.margin = 30
         self.star_points = self._star_points(board.size)
+        self.territory_owner: Optional[Dict[Tuple[int, int], int]] = None
+        self.show_territory = False
 
         self.hover_xy: Optional[Tuple[int, int]] = None
         self.last_move: Optional[Tuple[int, int]] = None
+        self._territory_owner: Optional[Dict[Tuple[int, int], int]] = None
         self.setMouseTracking(True)
 
     def _star_points(self, n: int) -> List[Tuple[int, int]]:
@@ -170,6 +173,24 @@ class BoardWidget(QWidget):
                     painter.setPen(QPen(QColor(160, 160, 160), 1))
                 painter.drawEllipse(p, stone_r, stone_r)
 
+        # territory overlay (empty points only)
+        if self.show_territory and self.territory_owner:
+            overlay_r = stone_r * 0.6
+            for y in range(self.board.size):
+                for x in range(self.board.size):
+                    if self.board.get(x, y) != EMPTY:
+                        continue
+                    owner = self.territory_owner.get((x, y), EMPTY)
+                    if owner == BLACK:
+                        painter.setBrush(QBrush(QColor(30, 30, 30, 90)))
+                    elif owner == WHITE:
+                        painter.setBrush(QBrush(QColor(230, 230, 230, 140)))
+                    else:
+                        continue
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    p = self._xy_to_point(x, y)
+                    painter.drawEllipse(p, overlay_r, overlay_r)
+
         # last move highlight
         if self.last_move is not None:
             lx, ly = self.last_move
@@ -253,7 +274,9 @@ def _is_true_eye_region(board: GoBoard, region: List[Tuple[int, int]], color: in
     return True
 
 
-def _score_area_with_dead(board: GoBoard, komi: float) -> Tuple[float, int, int]:
+def _score_area_with_dead(
+    board: GoBoard, komi: float
+) -> Tuple[float, int, int, int, int, Dict[Tuple[int, int], int]]:
     size = board.size
     territory_owner: Dict[Tuple[int, int], int] = {}
     region_id_map: Dict[Tuple[int, int], int] = {}
@@ -356,7 +379,14 @@ def _score_area_with_dead(board: GoBoard, komi: float) -> Tuple[float, int, int]
 
     black_score = black_stones + black_territory + white_dead
     white_score = white_stones + white_territory + black_dead + komi
-    return black_score - white_score, black_dead, white_dead
+    return (
+        black_score - white_score,
+        black_dead,
+        white_dead,
+        black_territory,
+        white_territory,
+        territory_owner,
+    )
 
 
 def _apply_temperature(probs: np.ndarray, temperature: float) -> np.ndarray:
@@ -836,19 +866,37 @@ class MainWindow(QWidget):
         is_pass_end = self.board.consecutive_passes >= 2
         is_move_end = self.board.move_count() >= GUI_MAX_MOVES
         if (is_pass_end or is_move_end) and not self.game_over_shown:
-            score_diff, black_dead, white_dead = _score_area_with_dead(self.board, GUI_KOMI)
+            (
+                score_diff,
+                black_dead,
+                white_dead,
+                black_territory,
+                white_territory,
+                territory_owner,
+            ) = _score_area_with_dead(self.board, GUI_KOMI)
             winner = "흑" if score_diff > 0 else "백"
             result = f"{winner} 승 ({abs(score_diff):.1f}점 차)"
             reason = "연속 2패스" if is_pass_end else f"{GUI_MAX_MOVES}수 도달"
+            black_houses = black_territory + white_dead
+            white_houses = white_territory + black_dead
             dead_info = f"사석(추정): 흑 {black_dead} / 백 {white_dead}"
+            house_info = (
+                f"집(추정): 흑 {black_houses} (영역 {black_territory} + 사석 {white_dead}) / "
+                f"백 {white_houses} (영역 {white_territory} + 사석 {black_dead})"
+            )
             self.game_over_shown = True
             QMessageBox.information(
                 self, "게임 종료(임시)",
                 f"{reason}. (MVP) 여기서 종료로 간주합니다.\n"
                 f"계가 결과: {result} (코미 {GUI_KOMI})\n"
                 f"{dead_info}\n"
+                f"{house_info}\n"
                 "사석 추정 포함 자동 계산입니다."
             )
+            self._territory_owner = territory_owner
+            self.board_widget.territory_owner = territory_owner
+            self.board_widget.show_territory = True
+            self.board_widget.update()
             self._log_gui_game(score_diff, reason)
 
     def on_human_move(self, x: int, y: int):
@@ -970,6 +1018,9 @@ class MainWindow(QWidget):
         self.board_widget.last_move = None
         self.game_over_shown = False
         self._recent_values.clear()
+        self._territory_owner = None
+        self.board_widget.territory_owner = None
+        self.board_widget.show_territory = False
         self._update_status()
         self.board_widget.update()
 
@@ -982,6 +1033,9 @@ class MainWindow(QWidget):
         self.board_widget.last_move = None
         self.game_over_shown = False
         self._recent_values.clear()
+        self._territory_owner = None
+        self.board_widget.territory_owner = None
+        self.board_widget.show_territory = False
         self._update_status()
         self.board_widget.update()
         if self.ai_vs_ai:
@@ -1143,6 +1197,9 @@ class MainWindow(QWidget):
         self.board_widget.last_move = None
         self.game_over_shown = False
         self._recent_values.clear()
+        self._territory_owner = None
+        self.board_widget.territory_owner = None
+        self.board_widget.show_territory = False
         self._update_sgf_controls()
         self._update_status()
         self.board_widget.update()

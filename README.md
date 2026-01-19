@@ -50,6 +50,8 @@ MCTS + self-play note:
 
 The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 GUI writes per-game results to `logs/gui_log.csv`.
+After a game ends, the GUI shows estimated territory counts (area + dead stones)
+and overlays territory on the board.
 GUI score estimation uses area scoring plus a simple dead-stone heuristic:
 - A group must have at least two true eyes (diagonal checks) to be considered alive.
 
@@ -151,6 +153,8 @@ python3 -m venv .venv
 
 GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영합니다.
 GUI 대국 결과는 `logs/gui_log.csv`에 기록됩니다.
+대국 종료 시 추정 집(영역+사석) 수치를 표시하고, 보드에 영역 오버레이를
+표시합니다.
 GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합니다:
 - 두 눈(대각선 검사 포함)을 만족해야 생존으로 판단합니다.
 
