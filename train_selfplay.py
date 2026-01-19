@@ -41,9 +41,9 @@ DEFAULT_BATCH_SIZE = 256
 DEFAULT_TRAIN_STEPS = 1
 DEFAULT_MCTS_SIMS = 100
 DEFAULT_DIRICHLET_ALPHA = 0.03
-DEFAULT_DIRICHLET_EPS = 0.25
-DEFAULT_MCTS_TEMP = 1.25
-DEFAULT_MCTS_TEMP_MOVES = 30
+DEFAULT_DIRICHLET_EPS = 0.30
+DEFAULT_MCTS_TEMP = 1.3
+DEFAULT_MCTS_TEMP_MOVES = 50
 DEFAULT_RESIGN_THRESHOLD = 0.99
 DEFAULT_RESIGN_START = 250
 DEFAULT_RESIGN_SCORE_CHECK_MOVES = 30
@@ -261,6 +261,8 @@ def _clone_board(board: GoBoard) -> GoBoard:
     new_board.grid = [row[:] for row in board.grid]
     new_board.to_play = board.to_play
     new_board.consecutive_passes = board.consecutive_passes
+    new_board.last_pass_player = board.last_pass_player
+    new_board.pass_streak = board.pass_streak
     new_board.prisoners_black = board.prisoners_black
     new_board.prisoners_white = board.prisoners_white
     new_board._prev_pos_hash = board._prev_pos_hash
@@ -272,6 +274,8 @@ def _clone_board(board: GoBoard) -> GoBoard:
             new_board.prisoners_black,
             new_board.prisoners_white,
             new_board._prev_pos_hash,
+            new_board.last_pass_player,
+            new_board.pass_streak,
         )
     ]
     return new_board
@@ -501,6 +505,10 @@ def play_episode(
         moves.append((board.to_play, move))
         board.play(move[0], move[1])
         move_count += 1
+        if board.pass_streak >= 3 and board.last_pass_player is not None:
+            resigned = True
+            resign_player = board.last_pass_player
+            break
         if show_progress:
             bar = _render_progress_bar(move_count, max_moves)
             pct = int((move_count / max_moves) * 100)

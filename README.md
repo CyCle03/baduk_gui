@@ -44,7 +44,7 @@ MCTS + self-play note:
 - If MCTS is enabled, starting `AI vs AI` will keep MCTS active as long as the
   policy model is available.
 - In self-play mode, MCTS adds Dirichlet noise and an opening temperature
-  (defaults: alpha `0.03`, eps `0.25`, temp `1.25`, first `30` moves).
+  (defaults: alpha `0.03`, eps `0.30`, temp `1.3`, first `50` moves).
 - In self-play mode, resign checks start at move 150 and PASS is blocked before
   move 150 to match CLI defaults.
 
@@ -52,6 +52,7 @@ The GUI auto-reloads the model every 10 seconds to reflect CLI training.
 GUI writes per-game results to `logs/gui_log.csv`.
 After a game ends, the GUI shows estimated territory counts (area + dead stones)
 and overlays territory on the board.
+If the same player passes 3 times in a row, the game is treated as a resignation.
 GUI score estimation uses area scoring plus a simple dead-stone heuristic:
 - A group must have at least two true eyes (diagonal checks) to be considered alive.
 
@@ -155,6 +156,7 @@ GUI는 10초마다 모델을 자동 리로드해서 CLI 학습 결과를 반영�
 GUI 대국 결과는 `logs/gui_log.csv`에 기록됩니다.
 대국 종료 시 추정 집(영역+사석) 수치를 표시하고, 보드에 영역 오버레이를
 표시합니다.
+같은 플레이어가 3번 연속 패스하면 기권 처리됩니다.
 GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합니다:
 - 두 눈(대각선 검사 포함)을 만족해야 생존으로 판단합니다.
 
@@ -216,7 +218,7 @@ MCTS + 자가대국 참고:
 - MCTS가 켜져 있으면 `AI vs AI`를 시작할 때 정책 모델이 로드된 상태에서
   계속 MCTS가 유지됩니다.
 - 자가대국 모드에서는 MCTS 루트 확률에 Dirichlet 노이즈와 초반 온도를
-  적용합니다(기본값: alpha `0.03`, eps `0.25`, temp `1.25`, 첫 `30`수).
+  적용합니다(기본값: alpha `0.03`, eps `0.30`, temp `1.3`, 첫 `50`수).
 - 자가대국 모드에서는 150수 이전 패스를 막고, 150수부터 기권 판단을
   시작하도록 CLI 기본값에 맞췄습니다.
 

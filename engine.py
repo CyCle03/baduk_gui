@@ -69,6 +69,8 @@ class GoBoard:
         self.grid = [[EMPTY] * size for _ in range(size)]
         self.to_play = BLACK
         self.consecutive_passes = 0
+        self.last_pass_player: Optional[int] = None
+        self.pass_streak = 0
 
         self.prisoners_black = 0  # stones captured by Black (i.e., White prisoners)
         self.prisoners_white = 0  # stones captured by White (i.e., Black prisoners)
@@ -77,7 +79,7 @@ class GoBoard:
         self._prev_pos_hash: Optional[int] = None
 
         # Undo stack: list of snapshots
-        self._history: List[Tuple[List[List[int]], int, int, int, int, Optional[int]]] = []
+        self._history: List[Tuple[List[List[int]], int, int, int, int, Optional[int], Optional[int], int]] = []
 
         # Start snapshot (optional) so undo works gracefully
         self._push_snapshot()
@@ -99,6 +101,8 @@ class GoBoard:
                 self.prisoners_black,
                 self.prisoners_white,
                 self._prev_pos_hash,
+                self.last_pass_player,
+                self.pass_streak,
             )
         )
 
@@ -107,13 +111,15 @@ class GoBoard:
         if len(self._history) <= 1:
             return False
         self._history.pop()
-        grid, to_play, passes, pb, pw, prev_hash = self._history[-1]
+        grid, to_play, passes, pb, pw, prev_hash, last_pass_player, pass_streak = self._history[-1]
         self.grid = [row[:] for row in grid]
         self.to_play = to_play
         self.consecutive_passes = passes
         self.prisoners_black = pb
         self.prisoners_white = pw
         self._prev_pos_hash = prev_hash
+        self.last_pass_player = last_pass_player
+        self.pass_streak = pass_streak
         return True
 
     def move_count(self) -> int:
@@ -214,6 +220,11 @@ class GoBoard:
     def play(self, x: int, y: int):
         # PASS
         if (x, y) == PASS_MOVE:
+            if self.last_pass_player == self.to_play:
+                self.pass_streak += 1
+            else:
+                self.pass_streak = 1
+                self.last_pass_player = self.to_play
             # Update ko baseline: after a real move, ko checks against previous position.
             # For pass, we still update prev_pos_hash to current position to keep ko consistent.
             self._prev_pos_hash = self._hash_position()
@@ -272,6 +283,8 @@ class GoBoard:
 
         # Update turn / passes / ko baseline
         self.consecutive_passes = 0
+        self.last_pass_player = None
+        self.pass_streak = 0
         self._prev_pos_hash = current_hash
         self.to_play = opp
 

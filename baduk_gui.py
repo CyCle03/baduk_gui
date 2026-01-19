@@ -42,9 +42,9 @@ GUI_MAX_MOVES = 300
 GUI_PASS_WIN_THRESHOLD = 0.7
 GUI_PASS_MIN_MOVES = 150
 GUI_MCTS_DIRICHLET_ALPHA = 0.03
-GUI_MCTS_DIRICHLET_EPS = 0.25
-GUI_MCTS_TEMP = 1.25
-GUI_MCTS_TEMP_MOVES = 30
+GUI_MCTS_DIRICHLET_EPS = 0.30
+GUI_MCTS_TEMP = 1.3
+GUI_MCTS_TEMP_MOVES = 50
 GUI_PASS_START = 300
 GUI_VALUE_WINDOW = 20
 GUI_VALUE_DELTA = 0.05
@@ -423,6 +423,8 @@ def _clone_board(board: GoBoard) -> GoBoard:
     new_board.grid = [row[:] for row in board.grid]
     new_board.to_play = board.to_play
     new_board.consecutive_passes = board.consecutive_passes
+    new_board.last_pass_player = board.last_pass_player
+    new_board.pass_streak = board.pass_streak
     new_board.prisoners_black = board.prisoners_black
     new_board.prisoners_white = board.prisoners_white
     new_board._prev_pos_hash = board._prev_pos_hash
@@ -434,6 +436,8 @@ def _clone_board(board: GoBoard) -> GoBoard:
             new_board.prisoners_black,
             new_board.prisoners_white,
             new_board._prev_pos_hash,
+            new_board.last_pass_player,
+            new_board.pass_streak,
         )
     ]
     return new_board
@@ -862,6 +866,12 @@ class MainWindow(QWidget):
         score_diff = -1.0 if resign_player == BLACK else 1.0
         self._log_gui_game(score_diff, "기권")
 
+    def _check_three_pass_resign(self) -> bool:
+        if self.board.pass_streak >= 3 and self.board.last_pass_player is not None:
+            self._show_resign(self.board.last_pass_player)
+            return True
+        return False
+
     def _maybe_game_end(self):
         is_pass_end = self.board.consecutive_passes >= 2
         is_move_end = self.board.move_count() >= GUI_MAX_MOVES
@@ -938,6 +948,8 @@ class MainWindow(QWidget):
             self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
+        if self._check_three_pass_resign():
+            return
         self._maybe_game_end()
 
         if self.board.consecutive_passes < 2 and self.board.move_count() < GUI_MAX_MOVES:
@@ -987,6 +999,8 @@ class MainWindow(QWidget):
             self.game_over_shown = False
         self._update_status()
         self.board_widget.update()
+        if self._check_three_pass_resign():
+            return
         self._maybe_game_end()
         if (
             self.board.consecutive_passes < 2
