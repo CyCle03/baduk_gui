@@ -69,8 +69,8 @@ Optional flags:
 - `--buffer-size 5000`
 - `--batch-size 256`
 - `--train-steps 1`
-- `--resign-threshold 0.98`
-- `--resign-start 200`
+- `--resign-threshold 0.99`
+- `--resign-start 250`
 - `--resign-score-check-moves 30` (skip resign near the end when area score favors current player)
 - `--data-dir ./data`
 - `--selfplay-only`
@@ -170,8 +170,8 @@ GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합
 - `--buffer-size 5000`
 - `--batch-size 256`
 - `--train-steps 1`
-- `--resign-threshold 0.98`
-- `--resign-start 200`
+- `--resign-threshold 0.99`
+- `--resign-start 250`
 - `--resign-score-check-moves 30` (막판 계가가 유리하면 기권을 건너뜀)
 - `--data-dir ./data`
 - `--selfplay-only`

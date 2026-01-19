@@ -49,8 +49,8 @@ GUI_PASS_START = 300
 GUI_VALUE_WINDOW = 20
 GUI_VALUE_DELTA = 0.05
 GUI_VALUE_MARGIN = 0.6
-GUI_RESIGN_THRESHOLD = 0.98
-GUI_RESIGN_START = 200
+GUI_RESIGN_THRESHOLD = 0.99
+GUI_RESIGN_START = 250
 GUI_LOG_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "gui_log.csv")
 
 # ----------------------------
