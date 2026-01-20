@@ -67,7 +67,7 @@ Optional flags:
 - `--komi 6.5`
 - `--save-every 10`
 - `--sleep 0.0`
-- `--mcts-sims 50`
+- `--mcts-sims 100`
 - `--mcts-cpuct 1.5`
 - `--buffer-size 5000`
 - `--batch-size 256`
@@ -171,7 +171,7 @@ GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합
 - `--komi 6.5`
 - `--save-every 10`
 - `--sleep 0.0` (에피소드 간 대기 시간, 0이면 없음)
-- `--mcts-sims 50`
+- `--mcts-sims 100`
 - `--mcts-cpuct 1.5`
 - `--buffer-size 5000`
 - `--batch-size 256`

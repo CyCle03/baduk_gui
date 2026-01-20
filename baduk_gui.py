@@ -607,7 +607,7 @@ class MainWindow(QWidget):
         self.ai = self._make_ai()
         self.ai_vs_ai = False
         self.use_mcts = True
-        self.mcts_simulations = 50
+        self.mcts_simulations = 100
         self.mcts_cpuct = 1.5
         self.train_running = False
         self.game_over_shown = False
