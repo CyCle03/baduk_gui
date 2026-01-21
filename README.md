@@ -80,7 +80,9 @@ Optional flags:
 - `--train-only`
 - `--save-selfplay`
 - `--max-data-files 0`
-- `--log-csv logs/train_log.csv` (CSV log file; use empty string to disable)
+- `--log-csv logs/train_log.csv` (CSV log file; use empty string to disable). When using the default path, logs are split automatically:
+  - GPU detected → `logs/train_log_cuda.csv`
+  - CPU only → `logs/train_log_cpu.csv`
 - `--progress` / `--no-progress`
 
 Models are saved to:
@@ -184,7 +186,9 @@ GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합
 - `--train-only`
 - `--save-selfplay`
 - `--max-data-files 0`
-- `--log-csv logs/train_log.csv` (CSV 로그 파일, 비활성화하려면 빈 문자열)
+- `--log-csv logs/train_log.csv` (CSV 로그 파일, 비활성화하려면 빈 문자열). 기본 경로를 쓰면 자동 분리됩니다:
+  - GPU 감지됨 → `logs/train_log_cuda.csv`
+  - CPU만 사용 → `logs/train_log_cpu.csv`
 - `--progress` / `--no-progress`
 
 모델 저장 위치:

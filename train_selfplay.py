@@ -51,6 +51,8 @@ DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 TRAIN_STATE_PATH = os.path.join(BASE_DIR, "train_state.json")
 TRAIN_STATE_BACKUP_PATH = os.path.join(MODEL_DIR, "train_state_backup.json")
 DEFAULT_LOG_CSV = os.path.join(BASE_DIR, "logs", "train_log.csv")
+DEFAULT_LOG_CUDA_CSV = os.path.join(BASE_DIR, "logs", "train_log_cuda.csv")
+DEFAULT_LOG_CPU_CSV = os.path.join(BASE_DIR, "logs", "train_log_cpu.csv")
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -581,6 +583,9 @@ def train(
     buffer = ReplayBuffer(buffer_size, use_policy_targets=use_policy_targets)
     csv_writer = None
     csv_file = None
+    cuda_enabled = bool(tf.config.list_physical_devices("GPU"))
+    if log_csv == DEFAULT_LOG_CSV:
+        log_csv = DEFAULT_LOG_CUDA_CSV if cuda_enabled else DEFAULT_LOG_CPU_CSV
 
     if log_csv:
         try:
@@ -599,6 +604,7 @@ def train(
                     "total_time",
                     "avg_time",
                     "recent10_avg",
+                    "cuda_enabled",
                 ],
             )
             if csv_file.tell() == 0:
@@ -740,6 +746,7 @@ def train(
                         "total_time": f"{total_time:.2f}",
                         "avg_time": f"{avg_time:.2f}",
                         "recent10_avg": f"{recent_avg:.2f}",
+                        "cuda_enabled": int(cuda_enabled),
                     }
                 )
                 csv_file.flush()
