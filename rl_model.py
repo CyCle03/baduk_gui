@@ -92,7 +92,11 @@ def masked_softmax(logits: np.ndarray, mask: np.ndarray, temperature: float) -> 
 
 def load_or_create_model(path: str, board_size: int) -> tf.keras.Model:
     if os.path.exists(path):
-        model = tf.keras.models.load_model(path)
+        try:
+            model = tf.keras.models.load_model(path)
+        except (OSError, ValueError) as exc:
+            print(f"Failed to load model at {path}: {exc}. Creating a new model.")
+            return build_policy_model(board_size)
         if len(model.outputs) == 2:
             input_shape = model.input_shape
             if isinstance(input_shape, list):
