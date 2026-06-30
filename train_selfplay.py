@@ -11,12 +11,14 @@ from typing import Deque, Dict, List, Optional, Tuple
 import numpy as np
 import tensorflow as tf
 
+import mcts
 from engine import GoBoard, BLACK, WHITE, PASS_MOVE
 from rl_model import (
     encode_board,
     index_to_move,
     legal_moves_mask,
     load_or_create_model,
+    make_infer_fn,
     move_to_index,
 )
 
@@ -44,6 +46,7 @@ DEFAULT_DIRICHLET_ALPHA = 0.03
 DEFAULT_DIRICHLET_EPS = 0.30
 DEFAULT_MCTS_TEMP = 1.3
 DEFAULT_MCTS_TEMP_MOVES = 50
+DEFAULT_MCTS_BATCH = 1
 DEFAULT_RESIGN_THRESHOLD = 0.99
 DEFAULT_RESIGN_START = 250
 DEFAULT_RESIGN_SCORE_CHECK_MOVES = 30
@@ -258,108 +261,21 @@ def _add_dirichlet_noise(
     return mixed / total
 
 
-class _MCTSNode:
-    def __init__(self, prior: float):
-        self.prior = float(prior)
-        self.visit_count = 0
-        self.value_sum = 0.0
-        self.children: Dict[int, "_MCTSNode"] = {}
-
-    def value(self) -> float:
-        if self.visit_count == 0:
-            return 0.0
-        return self.value_sum / self.visit_count
-
-
-def _select_child(node: _MCTSNode, cpuct: float) -> Tuple[int, _MCTSNode]:
-    total_visits = sum(child.visit_count for child in node.children.values())
-    best_score = -1e9
-    best_action = 0
-    best_child = None
-    for action_idx, child in node.children.items():
-        q = child.value()
-        u = cpuct * child.prior * math.sqrt(total_visits + 1) / (1 + child.visit_count)
-        score = q + u
-        if score > best_score:
-            best_score = score
-            best_action = action_idx
-            best_child = child
-    if best_child is None:
-        raise RuntimeError("MCTS selection failed")
-    return best_action, best_child
-
-
-def _terminal_value(board: GoBoard, komi: float, max_moves: int) -> Optional[float]:
-    if board.consecutive_passes >= 2 or board.move_count() >= max_moves:
-        score_diff = board.score_area(komi=komi)
-        result_black = 1.0 if score_diff > 0 else -1.0
-        return result_black if board.to_play == BLACK else -result_black
-    return None
-
-
 # Accumulates wall time spent inside neural-network inference for the current
 # episode. Reset by play_episode(); read back to split nn_time vs board_time.
 _NN_TIME_ACC = [0.0]
 
 
-def _expand_node(model: tf.keras.Model, node: _MCTSNode, board: GoBoard) -> float:
-    state = encode_board(board)
-    mask = legal_moves_mask(board)
-    _t0 = time.perf_counter()
-    logits, value = model(state[None, ...], training=False)
-    logits = logits.numpy()[0]
-    value = float(value.numpy()[0][0])
-    _NN_TIME_ACC[0] += time.perf_counter() - _t0
-    probs = _masked_softmax(logits, mask)
-    for idx, p in enumerate(probs):
-        if mask[idx] > 0:
-            node.children[idx] = _MCTSNode(p)
-    return value
+def _timed_infer(infer_fn):
+    """Wrap a batched infer_fn so NN time is folded into _NN_TIME_ACC."""
 
+    def wrapped(states):
+        _t0 = time.perf_counter()
+        out = infer_fn(states)
+        _NN_TIME_ACC[0] += time.perf_counter() - _t0
+        return out
 
-def _mcts_search(
-    model: tf.keras.Model,
-    board: GoBoard,
-    num_simulations: int,
-    cpuct: float,
-    komi: float,
-    max_moves: int,
-) -> Tuple[np.ndarray, float]:
-    root = _MCTSNode(1.0)
-    root_value = _expand_node(model, root, board)
-
-    for _ in range(num_simulations):
-        node = root
-        sim_board = board.clone_light()
-        path = [node]
-        while node.children:
-            action_idx, node = _select_child(node, cpuct)
-            move = index_to_move(action_idx, sim_board.size)
-            sim_board.play_fast(move[0], move[1])
-            path.append(node)
-
-        terminal = _terminal_value(sim_board, komi, max_moves)
-        if terminal is None:
-            value = _expand_node(model, node, sim_board)
-        else:
-            value = terminal
-
-        for n in reversed(path):
-            n.visit_count += 1
-            n.value_sum += value
-            value = -value
-
-    action_size = board.size * board.size + 1
-    counts = np.zeros(action_size, dtype=np.float32)
-    for action_idx, child in root.children.items():
-        counts[action_idx] = child.visit_count
-    total = np.sum(counts)
-    if total <= 0:
-        mask = legal_moves_mask(board)
-        counts = mask / np.sum(mask)
-    else:
-        counts = counts / total
-    return counts, root_value
+    return wrapped
 
 
 def sample_action(model: tf.keras.Model, board: GoBoard, mask: Optional[np.ndarray] = None) -> Tuple[int, float]:
@@ -404,6 +320,8 @@ def play_episode(
     resign_start: int = DEFAULT_RESIGN_START,
     resign_score_check_moves: int = DEFAULT_RESIGN_SCORE_CHECK_MOVES,
     show_progress: bool = False,
+    infer_fn=None,
+    mcts_batch: int = 1,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -415,6 +333,8 @@ def play_episode(
     float,
     float,
 ]:
+    if infer_fn is None:
+        infer_fn = _timed_infer(make_infer_fn(model))
     board = GoBoard(board_size)
     _NN_TIME_ACC[0] = 0.0
     episode_t0 = time.perf_counter()
@@ -433,13 +353,14 @@ def play_episode(
         pass_allowed = move_count >= pass_min_moves
         maybe_policy = None
         if use_mcts and mcts_simulations > 0:
-            probs, value = _mcts_search(
-                model,
+            probs, value = mcts.run_search(
+                infer_fn,
                 board,
                 mcts_simulations,
                 mcts_cpuct,
                 komi,
                 max_moves,
+                batch_size=mcts_batch,
             )
             mask = legal_moves_mask(board)
             if not pass_allowed:
@@ -541,6 +462,7 @@ def train(
     dirichlet_eps: float = DEFAULT_DIRICHLET_EPS,
     mcts_temperature: float = DEFAULT_MCTS_TEMP,
     mcts_temperature_moves: int = DEFAULT_MCTS_TEMP_MOVES,
+    mcts_batch: int = DEFAULT_MCTS_BATCH,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     train_steps: int = DEFAULT_TRAIN_STEPS,
@@ -563,6 +485,7 @@ def train(
     optimizer = tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE)
     # Build variables before restoring optimizer state.
     _ = model(tf.zeros((1, board_size, board_size, 3)))
+    infer_fn = _timed_infer(make_infer_fn(model))
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
     manager = tf.train.CheckpointManager(checkpoint, CKPT_DIR, max_to_keep=3)
     if manager.latest_checkpoint:
@@ -648,6 +571,8 @@ def train(
                     resign_start=resign_start,
                     resign_score_check_moves=resign_score_check_moves,
                     show_progress=show_progress,
+                    infer_fn=infer_fn,
+                    mcts_batch=mcts_batch,
                 )
                 buffer.add(states, actions, policy_targets, rewards, value_targets)
 
@@ -795,6 +720,13 @@ if __name__ == "__main__":
         default=DEFAULT_MCTS_TEMP_MOVES,
         help="number of opening moves using temperature",
     )
+    parser.add_argument(
+        "--mcts-batch",
+        type=int,
+        default=DEFAULT_MCTS_BATCH,
+        help="MCTS leaves evaluated per batched inference (1 = exact sequential; "
+        ">1 enables virtual-loss leaf batching so the GPU is actually used)",
+    )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="replay buffer size")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="replay batch size")
     parser.add_argument("--train-steps", type=int, default=DEFAULT_TRAIN_STEPS, help="train steps per episode")
@@ -848,6 +780,7 @@ if __name__ == "__main__":
             dirichlet_eps=args.dirichlet_eps,
             mcts_temperature=args.mcts_temp,
             mcts_temperature_moves=args.mcts_temp_moves,
+            mcts_batch=args.mcts_batch,
             buffer_size=args.buffer_size,
             batch_size=args.batch_size,
             train_steps=args.train_steps,
