@@ -258,31 +258,6 @@ def _add_dirichlet_noise(
     return mixed / total
 
 
-def _clone_board(board: GoBoard) -> GoBoard:
-    new_board = GoBoard(board.size)
-    new_board.grid = [row[:] for row in board.grid]
-    new_board.to_play = board.to_play
-    new_board.consecutive_passes = board.consecutive_passes
-    new_board.last_pass_player = board.last_pass_player
-    new_board.pass_streak = board.pass_streak
-    new_board.prisoners_black = board.prisoners_black
-    new_board.prisoners_white = board.prisoners_white
-    new_board._prev_pos_hash = board._prev_pos_hash
-    new_board._history = [
-        (
-            new_board.copy_grid(),
-            new_board.to_play,
-            new_board.consecutive_passes,
-            new_board.prisoners_black,
-            new_board.prisoners_white,
-            new_board._prev_pos_hash,
-            new_board.last_pass_player,
-            new_board.pass_streak,
-        )
-    ]
-    return new_board
-
-
 class _MCTSNode:
     def __init__(self, prior: float):
         self.prior = float(prior)
@@ -322,12 +297,19 @@ def _terminal_value(board: GoBoard, komi: float, max_moves: int) -> Optional[flo
     return None
 
 
+# Accumulates wall time spent inside neural-network inference for the current
+# episode. Reset by play_episode(); read back to split nn_time vs board_time.
+_NN_TIME_ACC = [0.0]
+
+
 def _expand_node(model: tf.keras.Model, node: _MCTSNode, board: GoBoard) -> float:
     state = encode_board(board)
     mask = legal_moves_mask(board)
+    _t0 = time.perf_counter()
     logits, value = model(state[None, ...], training=False)
     logits = logits.numpy()[0]
     value = float(value.numpy()[0][0])
+    _NN_TIME_ACC[0] += time.perf_counter() - _t0
     probs = _masked_softmax(logits, mask)
     for idx, p in enumerate(probs):
         if mask[idx] > 0:
@@ -348,12 +330,12 @@ def _mcts_search(
 
     for _ in range(num_simulations):
         node = root
-        sim_board = _clone_board(board)
+        sim_board = board.clone_light()
         path = [node]
         while node.children:
             action_idx, node = _select_child(node, cpuct)
             move = index_to_move(action_idx, sim_board.size)
-            sim_board.play(move[0], move[1])
+            sim_board.play_fast(move[0], move[1])
             path.append(node)
 
         terminal = _terminal_value(sim_board, komi, max_moves)
@@ -384,9 +366,11 @@ def sample_action(model: tf.keras.Model, board: GoBoard, mask: Optional[np.ndarr
     state = encode_board(board)
     if mask is None:
         mask = legal_moves_mask(board)
+    _t0 = time.perf_counter()
     logits, value = model(state[None, ...], training=False)
     logits = logits.numpy()[0]
     value = float(value.numpy()[0][0])
+    _NN_TIME_ACC[0] += time.perf_counter() - _t0
     probs = _masked_softmax(logits, mask)
     return int(np.random.choice(len(probs), p=probs)), value
 
@@ -428,8 +412,12 @@ def play_episode(
     np.ndarray,
     float,
     List[Tuple[int, Tuple[int, int]]],
+    float,
+    float,
 ]:
     board = GoBoard(board_size)
+    _NN_TIME_ACC[0] = 0.0
+    episode_t0 = time.perf_counter()
     states: List[np.ndarray] = []
     actions: List[int] = []
     players: List[int] = []
@@ -525,6 +513,8 @@ def play_episode(
     result = 1.0 if score_diff > 0 else -1.0
     value_targets = np.array([result if p == BLACK else -result for p in players], dtype=np.float32)
     rewards = value_targets - np.mean(value_targets)
+    nn_time = _NN_TIME_ACC[0]
+    board_time = max(0.0, time.perf_counter() - episode_t0 - nn_time)
     return (
         np.array(states, dtype=np.float32),
         np.array(actions, dtype=np.int32),
@@ -533,6 +523,8 @@ def play_episode(
         value_targets,
         score_diff,
         moves,
+        nn_time,
+        board_time,
     )
 
 
@@ -601,6 +593,8 @@ def train(
                     "score_diff",
                     "moves",
                     "episode_time",
+                    "nn_time",
+                    "board_time",
                     "total_time",
                     "avg_time",
                     "recent10_avg",
@@ -634,9 +628,11 @@ def train(
                 score_diff = 0.0
                 moves = []
                 actions = np.array([], dtype=np.int32)
+                nn_time = 0.0
+                board_time = 0.0
             else:
                 train_state["total_episodes"] = train_state.get("total_episodes", 0) + 1
-                states, actions, policy_targets, rewards, value_targets, score_diff, moves = play_episode(
+                states, actions, policy_targets, rewards, value_targets, score_diff, moves, nn_time, board_time = play_episode(
                     model,
                     board_size,
                     komi,
@@ -730,7 +726,8 @@ def train(
             print(
                 f"episode={episode} loss={loss.numpy():.4f} policy={policy_loss.numpy():.4f} "
                 f"value={value_loss.numpy():.4f} score_diff={score_diff:.1f} moves={len(actions)} "
-                f"episode_time={episode_time:.2f}s total_time={total_time:.2f}s "
+                f"episode_time={episode_time:.2f}s nn_time={nn_time:.2f}s board_time={board_time:.2f}s "
+                f"total_time={total_time:.2f}s "
                 f"avg_time={avg_time:.2f}s recent10_avg={recent_avg:.2f}s"
             )
             if csv_writer is not None:
@@ -743,6 +740,8 @@ def train(
                         "score_diff": f"{score_diff:.1f}",
                         "moves": len(actions),
                         "episode_time": f"{episode_time:.2f}",
+                        "nn_time": f"{nn_time:.2f}",
+                        "board_time": f"{board_time:.2f}",
                         "total_time": f"{total_time:.2f}",
                         "avg_time": f"{avg_time:.2f}",
                         "recent10_avg": f"{recent_avg:.2f}",
@@ -819,31 +818,60 @@ if __name__ == "__main__":
         default=True,
         help="show per-episode progress bar",
     )
-    args = parser.parse_args()
-    train(
-        args.episodes,
-        board_size=args.board_size,
-        komi=args.komi,
-        save_every=args.save_every,
-        sleep_time=args.sleep,
-        mcts_simulations=args.mcts_sims,
-        mcts_cpuct=args.mcts_cpuct,
-        pass_min_moves=args.pass_min_moves,
-        dirichlet_alpha=args.dirichlet_alpha,
-        dirichlet_eps=args.dirichlet_eps,
-        mcts_temperature=args.mcts_temp,
-        mcts_temperature_moves=args.mcts_temp_moves,
-        buffer_size=args.buffer_size,
-        batch_size=args.batch_size,
-        train_steps=args.train_steps,
-        resign_threshold=args.resign_threshold,
-        resign_start=args.resign_start,
-        resign_score_check_moves=args.resign_score_check_moves,
-        data_dir=args.data_dir,
-        selfplay_only=args.selfplay_only,
-        train_only=args.train_only,
-        save_selfplay=args.save_selfplay,
-        max_data_files=args.max_data_files if args.max_data_files > 0 else None,
-        show_progress=args.progress,
-        log_csv=args.log_csv if args.log_csv else None,
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="run only 2 episodes under cProfile and print the top 25 functions by cumulative time",
     )
+    args = parser.parse_args()
+
+    episodes = args.episodes
+    save_every = args.save_every
+    log_csv = args.log_csv if args.log_csv else None
+    if args.profile:
+        # Short, no-side-effect run focused on the hot path.
+        episodes = 2
+        save_every = 10 ** 9  # effectively never save during profiling
+        log_csv = None
+
+    def _run():
+        train(
+            episodes,
+            board_size=args.board_size,
+            komi=args.komi,
+            save_every=save_every,
+            sleep_time=args.sleep,
+            mcts_simulations=args.mcts_sims,
+            mcts_cpuct=args.mcts_cpuct,
+            pass_min_moves=args.pass_min_moves,
+            dirichlet_alpha=args.dirichlet_alpha,
+            dirichlet_eps=args.dirichlet_eps,
+            mcts_temperature=args.mcts_temp,
+            mcts_temperature_moves=args.mcts_temp_moves,
+            buffer_size=args.buffer_size,
+            batch_size=args.batch_size,
+            train_steps=args.train_steps,
+            resign_threshold=args.resign_threshold,
+            resign_start=args.resign_start,
+            resign_score_check_moves=args.resign_score_check_moves,
+            data_dir=args.data_dir,
+            selfplay_only=args.selfplay_only,
+            train_only=args.train_only,
+            save_selfplay=args.save_selfplay,
+            max_data_files=args.max_data_files if args.max_data_files > 0 else None,
+            show_progress=args.progress,
+            log_csv=log_csv,
+        )
+
+    if args.profile:
+        import cProfile
+        import pstats
+
+        profiler = cProfile.Profile()
+        profiler.runcall(_run)
+        stats = pstats.Stats(profiler)
+        stats.sort_stats("cumulative")
+        print("\n===== cProfile: top 25 by cumulative time =====")
+        stats.print_stats(25)
+    else:
+        _run()
