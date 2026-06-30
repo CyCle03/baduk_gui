@@ -418,31 +418,6 @@ def _add_dirichlet_noise(
     return mixed / total
 
 
-def _clone_board(board: GoBoard) -> GoBoard:
-    new_board = GoBoard(board.size)
-    new_board.grid = [row[:] for row in board.grid]
-    new_board.to_play = board.to_play
-    new_board.consecutive_passes = board.consecutive_passes
-    new_board.last_pass_player = board.last_pass_player
-    new_board.pass_streak = board.pass_streak
-    new_board.prisoners_black = board.prisoners_black
-    new_board.prisoners_white = board.prisoners_white
-    new_board._prev_pos_hash = board._prev_pos_hash
-    new_board._history = [
-        (
-            new_board.copy_grid(),
-            new_board.to_play,
-            new_board.consecutive_passes,
-            new_board.prisoners_black,
-            new_board.prisoners_white,
-            new_board._prev_pos_hash,
-            new_board.last_pass_player,
-            new_board.pass_streak,
-        )
-    ]
-    return new_board
-
-
 class _MCTSNode:
     def __init__(self, prior: float):
         self.prior = float(prior)
@@ -512,12 +487,12 @@ def _mcts_pick_move(
 
     for _ in range(num_simulations):
         node = root
-        sim_board = _clone_board(board)
+        sim_board = board.clone_light()
         path = [node]
         while node.children:
             action_idx, node = _select_child(node, cpuct)
             move = index_to_move(action_idx, sim_board.size)
-            sim_board.play(move[0], move[1])
+            sim_board.play_fast(move[0], move[1])
             path.append(node)
 
         terminal = _terminal_value(sim_board, GUI_KOMI, GUI_MAX_MOVES)
