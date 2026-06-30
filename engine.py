@@ -104,12 +104,13 @@ class GoBoard:
     19x19 Go-like board with:
       - capture
       - suicide forbidden (unless capturing makes it legal)
-      - basic ko: forbid recreating the immediate previous position
+      - ko: basic (forbid recreating the immediate previous position) or, when
+        superko=True, positional superko (forbid recreating ANY prior position)
       - pass
       - undo via snapshot stack
     """
 
-    def __init__(self, size: int = 19):
+    def __init__(self, size: int = 19, superko: bool = False):
         self.size = size
         self._zobrist = _get_zobrist(size)
         self._zhash = 0  # empty board => 0; updated incrementally via set()
@@ -128,6 +129,14 @@ class GoBoard:
         # for basic ko: store previous board position hash (just one-step)
         self._prev_pos_hash: Optional[int] = None
 
+        # Positional superko: every reached board position is remembered so a
+        # move recreating any of them is illegal. _position_added mirrors the
+        # move stack (the hash a move added, or None for a pass) so undo() can
+        # roll the set back. The initial empty position counts.
+        self.superko = superko
+        self._position_history = {self._zhash} if superko else None
+        self._position_added: List[Optional[int]] = []
+
         # Undo stack: list of snapshots
         self._history: List[Tuple[List[List[int]], int, int, int, int, Optional[int], Optional[int], int]] = []
 
@@ -141,6 +150,12 @@ class GoBoard:
         # O(1) incremental Zobrist hash of the board position (player not
         # included, matching the basic-ko semantics of comparing board shape).
         return self._zhash
+
+    def _is_repeat(self, new_hash: int) -> bool:
+        # Would playing to `new_hash` illegally recreate a position?
+        if self.superko:
+            return new_hash in self._position_history
+        return self._prev_pos_hash is not None and new_hash == self._prev_pos_hash
 
     def _zhash_full(self) -> int:
         # Recompute the Zobrist hash from scratch (validation / undo recovery).
@@ -186,6 +201,10 @@ class GoBoard:
         self.pass_streak = pass_streak
         self.num_moves = max(0, self.num_moves - 1)
         self._zhash = self._zhash_full()
+        if self.superko and self._position_added:
+            added = self._position_added.pop()
+            if added is not None:
+                self._position_history.discard(added)
         return True
 
     def move_count(self) -> int:
@@ -250,9 +269,12 @@ class GoBoard:
                     continue
                 # Shortcut: a point with at least one empty neighbor gives the
                 # placed stone its own liberty, so it can be neither suicide nor
-                # a ko recapture (a ko point is fully surrounded by definition).
-                # Only fully-enclosed points need the full legality check.
-                if self._has_empty_neighbor(x, y):
+                # a (basic) ko recapture (a ko point is fully surrounded by
+                # definition). Only fully-enclosed points need the full check.
+                # NOTE: under positional superko a repeating move can have empty
+                # neighbors, so the shortcut is unsound there and we always run
+                # the full is_legal check.
+                if not self.superko and self._has_empty_neighbor(x, y):
                     moves.append((x, y))
                 elif self.is_legal(x, y):
                     moves.append((x, y))
@@ -304,10 +326,9 @@ class GoBoard:
         _, our_libs = self._collect_group_and_liberties(x, y)
         legal = our_libs > 0
 
-        # Ko check: forbid recreating immediate previous position
-        # basic ko compares resulting position hash with previous position hash
+        # Ko / superko check: forbid recreating a forbidden prior position.
         new_hash = self._hash_position()
-        if self._prev_pos_hash is not None and new_hash == self._prev_pos_hash:
+        if self._is_repeat(new_hash):
             legal = False
 
         # revert simulation
@@ -330,6 +351,10 @@ class GoBoard:
             self.consecutive_passes += 1
             self.to_play = opponent(self.to_play)
             self.num_moves += 1
+            if self.superko:
+                # A pass leaves the board position unchanged (already in the
+                # set); record None so undo() stays aligned with the move stack.
+                self._position_added.append(None)
             self._push_snapshot()
             return
 
@@ -369,9 +394,9 @@ class GoBoard:
             self._zhash = saved_zhash
             raise IllegalMove("suicide")
 
-        # Ko check: resulting position must not equal immediate previous position
+        # Ko / superko check: resulting position must not repeat a forbidden one.
         new_hash = self._hash_position()
-        if self._prev_pos_hash is not None and new_hash == self._prev_pos_hash:
+        if self._is_repeat(new_hash):
             # revert
             self.grid = saved_grid
             self._zhash = saved_zhash
@@ -391,6 +416,9 @@ class GoBoard:
         self._prev_pos_hash = current_hash
         self.to_play = opp
         self.num_moves += 1
+        if self.superko:
+            self._position_history.add(new_hash)
+            self._position_added.append(new_hash)
 
         self._push_snapshot()
 
@@ -413,6 +441,11 @@ class GoBoard:
         nb.prisoners_black = self.prisoners_black
         nb.prisoners_white = self.prisoners_white
         nb._prev_pos_hash = self._prev_pos_hash
+        # Simulations use cheap basic ko (no per-clone position-set copy); they
+        # are bounded by max_moves anyway.
+        nb.superko = False
+        nb._position_history = None
+        nb._position_added = []
         nb._history = []
         return nb
 

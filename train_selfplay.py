@@ -325,6 +325,7 @@ def play_episode(
     show_progress: bool = False,
     infer_fn=None,
     mcts_batch: int = 1,
+    superko: bool = True,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -338,7 +339,7 @@ def play_episode(
 ]:
     if infer_fn is None:
         infer_fn = _timed_infer(make_infer_fn(model))
-    board = GoBoard(board_size)
+    board = GoBoard(board_size, superko=superko)
     _NN_TIME_ACC[0] = 0.0
     episode_t0 = time.perf_counter()
     states: List[np.ndarray] = []
@@ -466,6 +467,7 @@ def train(
     mcts_temperature: float = DEFAULT_MCTS_TEMP,
     mcts_temperature_moves: int = DEFAULT_MCTS_TEMP_MOVES,
     mcts_batch: int = DEFAULT_MCTS_BATCH,
+    superko: bool = True,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     train_steps: int = DEFAULT_TRAIN_STEPS,
@@ -580,6 +582,7 @@ def train(
                     show_progress=show_progress,
                     infer_fn=infer_fn,
                     mcts_batch=mcts_batch,
+                    superko=superko,
                 )
                 buffer.add(states, actions, policy_targets, rewards, value_targets)
 
@@ -748,6 +751,12 @@ if __name__ == "__main__":
         default=DEFAULT_MCTS_TEMP_MOVES,
         help="number of opening moves using temperature",
     )
+    parser.add_argument(
+        "--superko",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use positional superko in self-play (forbid recreating any prior position)",
+    )
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS, help="conv channels (new models)")
     parser.add_argument("--blocks", type=int, default=DEFAULT_BLOCKS, help="residual blocks (new models)")
     parser.add_argument(
@@ -823,6 +832,7 @@ if __name__ == "__main__":
             mcts_temperature=args.mcts_temp,
             mcts_temperature_moves=args.mcts_temp_moves,
             mcts_batch=args.mcts_batch,
+            superko=args.superko,
             channels=args.channels,
             blocks=args.blocks,
             eval_every=args.eval_every,
