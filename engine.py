@@ -51,6 +51,33 @@ def neighbors(n: int, x: int, y: int):
         yield (x, y + 1)
 
 
+def star_points(n: int) -> List[Tuple[int, int]]:
+    """Hoshi (star point) coordinates for an n x n board, 0-indexed.
+
+    Generic rule that reproduces the standard layouts: corner points sit `edge`
+    in from each side (3 for boards >= 13, else 2); odd boards add a tengen
+    (center) and, for boards >= 13, the four side midpoints. This yields the
+    canonical 9 points on 19x19 and 13x13, and 5 points on 9x9 and 7x7.
+    """
+    if n < 7:
+        return [(n // 2, n // 2)] if n % 2 == 1 else []
+    edge = 3 if n >= 13 else 2
+    last = n - 1 - edge
+    pts = [(edge, edge), (edge, last), (last, edge), (last, last)]
+    if n % 2 == 1:
+        c = n // 2
+        pts.append((c, c))
+        if n >= 13:
+            pts += [(edge, c), (last, c), (c, edge), (c, last)]
+    seen = set()
+    out = []
+    for p in pts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def _is_true_eye_region(board: "GoBoard", region: List[Tuple[int, int]], color: int) -> bool:
     opp = opponent(color)
     for x, y in region:

@@ -17,18 +17,18 @@ from features import (
 )
 
 
-def build_policy_model(board_size: int) -> tf.keras.Model:
+def build_policy_model(board_size: int, channels: int = 64, blocks: int = 4) -> tf.keras.Model:
     inputs = tf.keras.Input(shape=(board_size, board_size, 3))
-    x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(inputs)
+    x = tf.keras.layers.Conv2D(channels, 3, padding="same", activation="relu")(inputs)
 
     def residual_block(t):
         skip = t
-        t = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(t)
-        t = tf.keras.layers.Conv2D(64, 3, padding="same")(t)
+        t = tf.keras.layers.Conv2D(channels, 3, padding="same", activation="relu")(t)
+        t = tf.keras.layers.Conv2D(channels, 3, padding="same")(t)
         t = tf.keras.layers.Add()([t, skip])
         return tf.keras.layers.Activation("relu")(t)
 
-    for _ in range(4):
+    for _ in range(blocks):
         x = residual_block(x)
 
     # Policy head
@@ -90,13 +90,15 @@ def make_infer_fn(model: tf.keras.Model):
     return infer
 
 
-def load_or_create_model(path: str, board_size: int) -> tf.keras.Model:
+def load_or_create_model(
+    path: str, board_size: int, channels: int = 64, blocks: int = 4
+) -> tf.keras.Model:
     if os.path.exists(path):
         try:
             model = tf.keras.models.load_model(path)
         except (OSError, ValueError) as exc:
             print(f"Failed to load model at {path}: {exc}. Creating a new model.")
-            return build_policy_model(board_size)
+            return build_policy_model(board_size, channels, blocks)
         if len(model.outputs) == 2:
             input_shape = model.input_shape
             if isinstance(input_shape, list):
@@ -104,10 +106,10 @@ def load_or_create_model(path: str, board_size: int) -> tf.keras.Model:
             if input_shape[1] == board_size and input_shape[2] == board_size:
                 return model
             print("Model board size mismatch; creating new policy+value model.")
-            return build_policy_model(board_size)
+            return build_policy_model(board_size, channels, blocks)
         print("Loaded legacy policy-only model; creating new policy+value model.")
-        return build_policy_model(board_size)
-    return build_policy_model(board_size)
+        return build_policy_model(board_size, channels, blocks)
+    return build_policy_model(board_size, channels, blocks)
 
 
 class PolicyAI:

@@ -27,6 +27,7 @@ from engine import (
     in_bounds,
     neighbors,
     opponent,
+    star_points,
 )
 
 import mcts
@@ -96,13 +97,7 @@ class BoardWidget(QWidget):
         self.setMouseTracking(True)
 
     def _star_points(self, n: int) -> List[Tuple[int, int]]:
-        # Standard 19x19 hoshi: (3,3) etc 0-indexed => (3,3), (3,9), (3,15) ...
-        if n == 19:
-            pts = [3, 9, 15]
-            return [(x, y) for x in pts for y in pts]
-        # fallback: simple center
-        c = n // 2
-        return [(c, c)]
+        return star_points(n)
 
     def _cell(self) -> float:
         w = self.width() - 2 * self.margin
@@ -515,11 +510,14 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
 
 
 class MainWindow(QWidget):
-    def __init__(self):
+    def __init__(self, board_size: int = 19):
         super().__init__()
-        self.setWindowTitle("Baduk 19x19 (Korean-rules-ish MVP) - Human(B) vs RandomAI(W)")
+        self.board_size = board_size
+        self.setWindowTitle(
+            f"Baduk {board_size}x{board_size} (Korean-rules-ish MVP) - Human(B) vs RandomAI(W)"
+        )
 
-        self.board = GoBoard(19)
+        self.board = GoBoard(board_size)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.model_path = os.path.join(base_dir, "models", "latest.keras")
         self.train_script = os.path.join(base_dir, "train_selfplay.py")
@@ -960,7 +958,7 @@ class MainWindow(QWidget):
     def on_new_game(self):
         if self.sgf_mode:
             return
-        self.board = GoBoard(19)
+        self.board = GoBoard(self.board_size)
         self.board_widget.board = self.board
         self.last_move = None
         self.board_widget.last_move = None
@@ -1124,7 +1122,7 @@ class MainWindow(QWidget):
         self.sgf_mode = False
         self.sgf_moves = []
         self.sgf_index = 0
-        self.board = GoBoard(19)
+        self.board = GoBoard(self.board_size)
         self.board_widget.board = self.board
         self.last_move = None
         self.board_widget.last_move = None
@@ -1207,7 +1205,7 @@ class MainWindow(QWidget):
                 self.sgf_mode = False
                 self.sgf_moves = []
                 self.sgf_index = 0
-                self.board = GoBoard(19)
+                self.board = GoBoard(self.board_size)
                 self.board_widget.board = self.board
                 self.last_move = None
                 self.board_widget.last_move = None
@@ -1250,9 +1248,15 @@ def pick_korean_font(size: int) -> QFont:
     return QFont("Sans Serif", size)
 
 def main():
-    app = QApplication(sys.argv)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Baduk GUI")
+    parser.add_argument("--board-size", type=int, default=19, help="board size (e.g. 9, 13, 19)")
+    args, qt_argv = parser.parse_known_args()
+
+    app = QApplication([sys.argv[0]] + qt_argv)
     app.setFont(pick_korean_font(12))
-    w = MainWindow()
+    w = MainWindow(board_size=args.board_size)
     w.show()
     rc = app.exec()
     if w._gui_log is not None:

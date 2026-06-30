@@ -47,6 +47,9 @@ DEFAULT_DIRICHLET_EPS = 0.30
 DEFAULT_MCTS_TEMP = 1.3
 DEFAULT_MCTS_TEMP_MOVES = 50
 DEFAULT_MCTS_BATCH = 1
+DEFAULT_CHANNELS = 64
+DEFAULT_BLOCKS = 4
+DEFAULT_EVAL_GAMES = 20
 DEFAULT_RESIGN_THRESHOLD = 0.99
 DEFAULT_RESIGN_START = 250
 DEFAULT_RESIGN_SCORE_CHECK_MOVES = 30
@@ -476,12 +479,16 @@ def train(
     max_data_files: Optional[int] = None,
     show_progress: bool = True,
     log_csv: Optional[str] = DEFAULT_LOG_CSV,
+    channels: int = DEFAULT_CHANNELS,
+    blocks: int = DEFAULT_BLOCKS,
+    eval_every: int = 0,
+    eval_games: int = DEFAULT_EVAL_GAMES,
 ):
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     train_state = _load_train_state(TRAIN_STATE_PATH)
 
-    model = load_or_create_model(MODEL_PATH, board_size)
+    model = load_or_create_model(MODEL_PATH, board_size, channels, blocks)
     optimizer = tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE)
     # Build variables before restoring optimizer state.
     _ = model(tf.zeros((1, board_size, board_size, 3)))
@@ -641,6 +648,27 @@ def train(
                 _save_train_state(TRAIN_STATE_PATH, train_state)
                 _backup_train_state(TRAIN_STATE_PATH, TRAIN_STATE_BACKUP_PATH)
 
+            if (
+                eval_every > 0
+                and not selfplay_only
+                and not train_only
+                and episode % eval_every == 0
+            ):
+                try:
+                    from eval import evaluate_model
+
+                    evaluate_model(
+                        model,
+                        board_size,
+                        eval_games,
+                        komi,
+                        DEFAULT_MAX_MOVES,
+                        seed=0,
+                        episode=episode,
+                    )
+                except Exception as exc:  # eval must never crash training
+                    print(f"eval failed: {exc}")
+
             episode_time = time.perf_counter() - episode_start
             total_time = time.perf_counter() - start_time
             avg_time = total_time / episode
@@ -720,6 +748,20 @@ if __name__ == "__main__":
         default=DEFAULT_MCTS_TEMP_MOVES,
         help="number of opening moves using temperature",
     )
+    parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS, help="conv channels (new models)")
+    parser.add_argument("--blocks", type=int, default=DEFAULT_BLOCKS, help="residual blocks (new models)")
+    parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=0,
+        help="run a deterministic vs-Random eval every N episodes (0 disables)",
+    )
+    parser.add_argument(
+        "--eval-games",
+        type=int,
+        default=DEFAULT_EVAL_GAMES,
+        help="games per --eval-every evaluation",
+    )
     parser.add_argument(
         "--mcts-batch",
         type=int,
@@ -781,6 +823,10 @@ if __name__ == "__main__":
             mcts_temperature=args.mcts_temp,
             mcts_temperature_moves=args.mcts_temp_moves,
             mcts_batch=args.mcts_batch,
+            channels=args.channels,
+            blocks=args.blocks,
+            eval_every=args.eval_every,
+            eval_games=args.eval_games,
             buffer_size=args.buffer_size,
             batch_size=args.batch_size,
             train_steps=args.train_steps,
