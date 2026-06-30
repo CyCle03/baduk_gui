@@ -69,6 +69,15 @@ Optional flags:
 - `--sleep 0.0`
 - `--mcts-sims 100`
 - `--mcts-cpuct 1.5`
+- `--mcts-batch 1` (MCTS leaves evaluated per batched inference; `1` is the exact
+  sequential search, `>1` enables virtual-loss leaf batching so the GPU is used)
+- `--channels 64` / `--blocks 4` (size of newly created models)
+- `--superko` / `--no-superko` (positional superko in self-play; on by default —
+  forbids recreating any prior board position, preventing infinite repetition)
+- `--augment` (augment training batches with random 8-fold board symmetries)
+- `--eval-every 0` / `--eval-games 20` (every N episodes, run a deterministic
+  vs-Random evaluation and append the winrate to `logs/eval_log.csv`)
+- `--profile` (run 2 episodes under cProfile and print the top 25 functions)
 - `--buffer-size 5000`
 - `--batch-size 256`
 - `--train-steps 1`
@@ -111,6 +120,41 @@ Self-play data modes:
 - `--selfplay-only`: generate self-play data to `--data-dir` only
 - `--train-only`: train from data in `--data-dir` only
 - `--save-selfplay`: save self-play data while training
+
+## Evaluation
+
+Pit two players (a `.keras` model or `random`) against each other with
+deterministic play (argmax legal move, no Dirichlet/temperature), alternating
+colors for fairness:
+
+```bash
+python eval.py --p1 models/latest.keras --p2 random --games 40 --seed 0
+python eval.py --p1 models/latest.keras --p2 models/checkpoint_000100.keras --games 40
+```
+
+Results (P1 winrate, average margin) are appended to `logs/eval_log.csv`. With a
+fixed `--seed` a run is reproducible. During training, `--eval-every N` records
+the same vs-Random curve automatically.
+
+## Smaller boards
+
+Both training and the GUI take `--board-size` (e.g. `9` or `13`), which is the
+fastest way to iterate on experiments:
+
+```bash
+python train_selfplay.py --board-size 9 --channels 32 --blocks 3 --eval-every 50
+python baduk_gui.py --board-size 9
+```
+
+Star points (hoshi) adapt to the board size automatically.
+
+## Architecture notes
+
+- `features.py` — TF-free board encoding / move indexing (vectorized).
+- `mcts.py` — the single MCTS implementation shared by self-play and the GUI;
+  inference is injected as a function so the GPU model and test stubs share code.
+- `engine.py` — board logic with incremental Zobrist hashing and a light
+  (history-free) simulation path (`clone_light` / `play_fast`).
 
 ## Notes
 

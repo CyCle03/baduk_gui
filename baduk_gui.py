@@ -27,15 +27,38 @@ from engine import (
     in_bounds,
     neighbors,
     opponent,
+    star_points,
 )
 
+import mcts
+
 try:
-    from rl_model import PolicyAI, encode_board, index_to_move, legal_moves_mask
+    from rl_model import (
+        PolicyAI,
+        encode_board,
+        index_to_move,
+        legal_moves_mask,
+        make_infer_fn,
+    )
 except Exception:
     PolicyAI = None
     encode_board = None
     index_to_move = None
     legal_moves_mask = None
+    make_infer_fn = None
+
+
+# Cache one batched infer_fn per model so the tf.function isn't retraced each
+# move (keyed by object id; a reloaded model gets a fresh entry).
+_INFER_CACHE: Dict[int, object] = {}
+
+
+def _get_infer_fn(model):
+    fn = _INFER_CACHE.get(id(model))
+    if fn is None:
+        fn = make_infer_fn(model)
+        _INFER_CACHE[id(model)] = fn
+    return fn
 
 GUI_KOMI = 6.5
 GUI_MAX_MOVES = 300
@@ -74,13 +97,7 @@ class BoardWidget(QWidget):
         self.setMouseTracking(True)
 
     def _star_points(self, n: int) -> List[Tuple[int, int]]:
-        # Standard 19x19 hoshi: (3,3) etc 0-indexed => (3,3), (3,9), (3,15) ...
-        if n == 19:
-            pts = [3, 9, 15]
-            return [(x, y) for x in pts for y in pts]
-        # fallback: simple center
-        c = n // 2
-        return [(c, c)]
+        return star_points(n)
 
     def _cell(self) -> float:
         w = self.width() - 2 * self.margin
@@ -418,85 +435,6 @@ def _add_dirichlet_noise(
     return mixed / total
 
 
-def _clone_board(board: GoBoard) -> GoBoard:
-    new_board = GoBoard(board.size)
-    new_board.grid = [row[:] for row in board.grid]
-    new_board.to_play = board.to_play
-    new_board.consecutive_passes = board.consecutive_passes
-    new_board.last_pass_player = board.last_pass_player
-    new_board.pass_streak = board.pass_streak
-    new_board.prisoners_black = board.prisoners_black
-    new_board.prisoners_white = board.prisoners_white
-    new_board._prev_pos_hash = board._prev_pos_hash
-    new_board._history = [
-        (
-            new_board.copy_grid(),
-            new_board.to_play,
-            new_board.consecutive_passes,
-            new_board.prisoners_black,
-            new_board.prisoners_white,
-            new_board._prev_pos_hash,
-            new_board.last_pass_player,
-            new_board.pass_streak,
-        )
-    ]
-    return new_board
-
-
-class _MCTSNode:
-    def __init__(self, prior: float):
-        self.prior = float(prior)
-        self.visit_count = 0
-        self.value_sum = 0.0
-        self.children: Dict[int, "_MCTSNode"] = {}
-
-    def value(self) -> float:
-        if self.visit_count == 0:
-            return 0.0
-        return self.value_sum / self.visit_count
-
-
-def _select_child(node: _MCTSNode, cpuct: float) -> Tuple[int, _MCTSNode]:
-    total_visits = sum(child.visit_count for child in node.children.values())
-    best_score = -1e9
-    best_action = 0
-    best_child = None
-    for action_idx, child in node.children.items():
-        q = child.value()
-        u = cpuct * child.prior * math.sqrt(total_visits + 1) / (1 + child.visit_count)
-        score = q + u
-        if score > best_score:
-            best_score = score
-            best_action = action_idx
-            best_child = child
-    if best_child is None:
-        raise RuntimeError("MCTS selection failed")
-    return best_action, best_child
-
-
-def _terminal_value(board: GoBoard, komi: float, max_moves: int) -> Optional[float]:
-    if board.consecutive_passes >= 2 or board.move_count() >= max_moves:
-        score_diff = board.score_area(komi=komi)
-        result_black = 1.0 if score_diff > 0 else -1.0
-        return result_black if board.to_play == BLACK else -result_black
-    return None
-
-
-def _expand_node(model, node: _MCTSNode, board: GoBoard) -> float:
-    if encode_board is None or legal_moves_mask is None:
-        raise RuntimeError("rl_model helpers not available")
-    state = encode_board(board)
-    mask = legal_moves_mask(board)
-    logits, value = model(state[None, ...], training=False)
-    logits = logits.numpy()[0]
-    value = float(value.numpy()[0][0])
-    probs = _masked_softmax(logits, mask)
-    for idx, p in enumerate(probs):
-        if mask[idx] > 0:
-            node.children[idx] = _MCTSNode(p)
-    return value
-
-
 def _mcts_pick_move(
     model,
     board: GoBoard,
@@ -505,53 +443,29 @@ def _mcts_pick_move(
     use_exploration: bool,
     pass_allowed: bool,
 ) -> Tuple[Tuple[int, int], float]:
-    if index_to_move is None:
+    if index_to_move is None or make_infer_fn is None:
         raise RuntimeError("rl_model helpers not available")
-    root = _MCTSNode(1.0)
-    root_value = _expand_node(model, root, board)
+    infer_fn = _get_infer_fn(model)
+    counts, root_value = mcts.run_search(
+        infer_fn, board, num_simulations, cpuct, GUI_KOMI, GUI_MAX_MOVES, batch_size=1
+    )
 
-    for _ in range(num_simulations):
-        node = root
-        sim_board = _clone_board(board)
-        path = [node]
-        while node.children:
-            action_idx, node = _select_child(node, cpuct)
-            move = index_to_move(action_idx, sim_board.size)
-            sim_board.play(move[0], move[1])
-            path.append(node)
-
-        terminal = _terminal_value(sim_board, GUI_KOMI, GUI_MAX_MOVES)
-        if terminal is None:
-            value = _expand_node(model, node, sim_board)
-        else:
-            value = terminal
-
-        for n in reversed(path):
-            n.visit_count += 1
-            n.value_sum += value
-            value = -value
-
-    action_size = board.size * board.size + 1
-    counts = np.zeros(action_size, dtype=np.float32)
-    for action_idx, child in root.children.items():
-        counts[action_idx] = child.visit_count
+    pass_idx = board.size * board.size
     if not pass_allowed:
-        counts[board.size * board.size] = 0.0
+        counts = counts.copy()
+        counts[pass_idx] = 0.0
+
     if not use_exploration:
-        items = root.children.items()
-        if not pass_allowed:
-            items = [(k, v) for k, v in items if k != board.size * board.size]
-        best_action = max(items, key=lambda kv: kv[1].visit_count)[0]
+        if np.sum(counts) <= 0:
+            return PASS_MOVE, root_value
+        best_action = int(np.argmax(counts))
         return index_to_move(best_action, board.size), root_value
+
     total = np.sum(counts)
     if total <= 0:
-        mask = np.zeros_like(counts)
-        for action_idx in root.children.keys():
-            mask[action_idx] = 1.0
-        probs = mask / np.sum(mask)
-    else:
-        probs = counts / total
-        mask = (counts > 0).astype(np.float32)
+        return PASS_MOVE, root_value
+    probs = counts / total
+    mask = (counts > 0).astype(np.float32)
     probs = _add_dirichlet_noise(probs, mask, GUI_MCTS_DIRICHLET_ALPHA, GUI_MCTS_DIRICHLET_EPS)
     if board.move_count() < GUI_MCTS_TEMP_MOVES:
         probs = _apply_temperature(probs, GUI_MCTS_TEMP)
@@ -596,11 +510,14 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
 
 
 class MainWindow(QWidget):
-    def __init__(self):
+    def __init__(self, board_size: int = 19):
         super().__init__()
-        self.setWindowTitle("Baduk 19x19 (Korean-rules-ish MVP) - Human(B) vs RandomAI(W)")
+        self.board_size = board_size
+        self.setWindowTitle(
+            f"Baduk {board_size}x{board_size} (Korean-rules-ish MVP) - Human(B) vs RandomAI(W)"
+        )
 
-        self.board = GoBoard(19)
+        self.board = GoBoard(board_size)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.model_path = os.path.join(base_dir, "models", "latest.keras")
         self.train_script = os.path.join(base_dir, "train_selfplay.py")
@@ -1041,7 +958,7 @@ class MainWindow(QWidget):
     def on_new_game(self):
         if self.sgf_mode:
             return
-        self.board = GoBoard(19)
+        self.board = GoBoard(self.board_size)
         self.board_widget.board = self.board
         self.last_move = None
         self.board_widget.last_move = None
@@ -1205,7 +1122,7 @@ class MainWindow(QWidget):
         self.sgf_mode = False
         self.sgf_moves = []
         self.sgf_index = 0
-        self.board = GoBoard(19)
+        self.board = GoBoard(self.board_size)
         self.board_widget.board = self.board
         self.last_move = None
         self.board_widget.last_move = None
@@ -1288,7 +1205,7 @@ class MainWindow(QWidget):
                 self.sgf_mode = False
                 self.sgf_moves = []
                 self.sgf_index = 0
-                self.board = GoBoard(19)
+                self.board = GoBoard(self.board_size)
                 self.board_widget.board = self.board
                 self.last_move = None
                 self.board_widget.last_move = None
@@ -1331,9 +1248,15 @@ def pick_korean_font(size: int) -> QFont:
     return QFont("Sans Serif", size)
 
 def main():
-    app = QApplication(sys.argv)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Baduk GUI")
+    parser.add_argument("--board-size", type=int, default=19, help="board size (e.g. 9, 13, 19)")
+    args, qt_argv = parser.parse_known_args()
+
+    app = QApplication([sys.argv[0]] + qt_argv)
     app.setFont(pick_korean_font(12))
-    w = MainWindow()
+    w = MainWindow(board_size=args.board_size)
     w.show()
     rc = app.exec()
     if w._gui_log is not None:

@@ -6,60 +6,29 @@ import tensorflow as tf
 
 from engine import BLACK, WHITE, EMPTY, PASS_MOVE, GoBoard
 
-
-def action_size(board_size: int) -> int:
-    return board_size * board_size + 1
-
-
-def move_to_index(move: Tuple[int, int], board_size: int) -> int:
-    if move == PASS_MOVE:
-        return board_size * board_size
-    return move[1] * board_size + move[0]
-
-
-def index_to_move(idx: int, board_size: int) -> Tuple[int, int]:
-    if idx == board_size * board_size:
-        return PASS_MOVE
-    x = idx % board_size
-    y = idx // board_size
-    return (x, y)
+# TF-free feature helpers live in features.py; re-exported here so existing
+# imports (`from rl_model import encode_board, ...`) keep working.
+from features import (
+    action_size,
+    move_to_index,
+    index_to_move,
+    encode_board,
+    legal_moves_mask,
+)
 
 
-def encode_board(board: GoBoard) -> np.ndarray:
-    size = board.size
-    state = np.zeros((size, size, 3), dtype=np.float32)
-    for y in range(size):
-        for x in range(size):
-            v = board.get(x, y)
-            if v == BLACK:
-                state[y, x, 0] = 1.0
-            elif v == WHITE:
-                state[y, x, 1] = 1.0
-    if board.to_play == BLACK:
-        state[:, :, 2] = 1.0
-    return state
-
-
-def legal_moves_mask(board: GoBoard) -> np.ndarray:
-    size = board.size
-    mask = np.zeros(action_size(size), dtype=np.float32)
-    for move in board.legal_moves():
-        mask[move_to_index(move, size)] = 1.0
-    return mask
-
-
-def build_policy_model(board_size: int) -> tf.keras.Model:
+def build_policy_model(board_size: int, channels: int = 64, blocks: int = 4) -> tf.keras.Model:
     inputs = tf.keras.Input(shape=(board_size, board_size, 3))
-    x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(inputs)
+    x = tf.keras.layers.Conv2D(channels, 3, padding="same", activation="relu")(inputs)
 
     def residual_block(t):
         skip = t
-        t = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(t)
-        t = tf.keras.layers.Conv2D(64, 3, padding="same")(t)
+        t = tf.keras.layers.Conv2D(channels, 3, padding="same", activation="relu")(t)
+        t = tf.keras.layers.Conv2D(channels, 3, padding="same")(t)
         t = tf.keras.layers.Add()([t, skip])
         return tf.keras.layers.Activation("relu")(t)
 
-    for _ in range(4):
+    for _ in range(blocks):
         x = residual_block(x)
 
     # Policy head
@@ -90,13 +59,46 @@ def masked_softmax(logits: np.ndarray, mask: np.ndarray, temperature: float) -> 
     return probs
 
 
-def load_or_create_model(path: str, board_size: int) -> tf.keras.Model:
+def make_infer_fn(model: tf.keras.Model):
+    """Return ``infer(states) -> (logits, values)`` for batched NN inference.
+
+    ``states`` is an (N, size, size, 3) float array; the result is a tuple of
+    numpy arrays: logits (N, action_size) and values (N,). The inner call is
+    wrapped in a ``tf.function`` with retracing reduction so repeated calls with
+    varying batch sizes avoid the per-call eager dispatch overhead. This single
+    entry point is shared by self-play and the GUI so MCTS can evaluate many
+    leaves in one model call (the only way the GPU earns its keep here).
+    """
+
+    input_shape = model.input_shape
+    if isinstance(input_shape, list):
+        input_shape = input_shape[0]
+    # Fixed signature with a free batch dimension: any leaf-batch size reuses the
+    # same concrete function instead of triggering a retrace.
+    signature = tf.TensorSpec(
+        [None, input_shape[1], input_shape[2], input_shape[3]], tf.float32
+    )
+
+    @tf.function(input_signature=[signature])
+    def _forward(x):
+        return model(x, training=False)
+
+    def infer(states: np.ndarray):
+        logits, values = _forward(tf.convert_to_tensor(states, dtype=tf.float32))
+        return logits.numpy(), values.numpy()[:, 0]
+
+    return infer
+
+
+def load_or_create_model(
+    path: str, board_size: int, channels: int = 64, blocks: int = 4
+) -> tf.keras.Model:
     if os.path.exists(path):
         try:
             model = tf.keras.models.load_model(path)
         except (OSError, ValueError) as exc:
             print(f"Failed to load model at {path}: {exc}. Creating a new model.")
-            return build_policy_model(board_size)
+            return build_policy_model(board_size, channels, blocks)
         if len(model.outputs) == 2:
             input_shape = model.input_shape
             if isinstance(input_shape, list):
@@ -104,10 +106,10 @@ def load_or_create_model(path: str, board_size: int) -> tf.keras.Model:
             if input_shape[1] == board_size and input_shape[2] == board_size:
                 return model
             print("Model board size mismatch; creating new policy+value model.")
-            return build_policy_model(board_size)
+            return build_policy_model(board_size, channels, blocks)
         print("Loaded legacy policy-only model; creating new policy+value model.")
-        return build_policy_model(board_size)
-    return build_policy_model(board_size)
+        return build_policy_model(board_size, channels, blocks)
+    return build_policy_model(board_size, channels, blocks)
 
 
 class PolicyAI:
