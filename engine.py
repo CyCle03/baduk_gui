@@ -478,11 +478,9 @@ class GoBoard:
         for y in range(self.size):
             for x in range(self.size):
                 v = self.get(x, y)
-                if v == BLACK:
-                    black_stones += 1
-                    continue
-                if v == WHITE:
-                    white_stones += 1
+                # Stones are tallied in the second (life/death) pass below; here
+                # we only skip them so they don't seed empty-territory regions.
+                if v != EMPTY:
                     continue
                 if (x, y) in visited:
                     continue

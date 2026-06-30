@@ -5,6 +5,7 @@ from engine import (
     BLACK,
     EMPTY,
     PASS_MOVE,
+    WHITE,
     GoBoard,
     IllegalMove,
 )
@@ -166,9 +167,20 @@ class TestScoring(unittest.TestCase):
             for x in range(5):
                 if (x, y) not in eyes:
                     board.set(x, y, BLACK)
-        # Black owns the whole board, so the score must be clearly positive
-        # (well above komi). Exact magnitude is left to score_area's own logic.
-        self.assertGreater(board.score_area(komi=6.5), 0)
+        # 23 living stones + 2 territory (the two eyes) - 6.5 komi == 18.5.
+        # (Living stones are counted exactly once.)
+        self.assertAlmostEqual(board.score_area(komi=6.5), 18.5)
+
+    def test_alive_white_group_scores_symmetric(self):
+        # Same shape for White: 23 stones + 2 territory + komi, all for White.
+        board = GoBoard(5)
+        eyes = {(1, 1), (3, 3)}
+        for y in range(5):
+            for x in range(5):
+                if (x, y) not in eyes:
+                    board.set(x, y, WHITE)
+        # black_score 0 - white_score (23 + 2 + 6.5) == -31.5
+        self.assertAlmostEqual(board.score_area(komi=6.5), -31.5)
 
 
 if __name__ == "__main__":
