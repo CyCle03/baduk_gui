@@ -72,6 +72,9 @@ Optional flags:
 - `--mcts-batch 1` (MCTS leaves evaluated per batched inference; `1` is the exact
   sequential search, `>1` enables virtual-loss leaf batching so the GPU is used)
 - `--channels 64` / `--blocks 4` (size of newly created models)
+- `--superko` / `--no-superko` (positional superko in self-play; on by default —
+  forbids recreating any prior board position, preventing infinite repetition)
+- `--augment` (augment training batches with random 8-fold board symmetries)
 - `--eval-every 0` / `--eval-games 20` (every N episodes, run a deterministic
   vs-Random evaluation and append the winrate to `logs/eval_log.csv`)
 - `--profile` (run 2 episodes under cProfile and print the top 25 functions)

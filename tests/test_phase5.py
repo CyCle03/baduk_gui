@@ -1,7 +1,16 @@
 import random
 import unittest
 
+import numpy as np
+
 from engine import GoBoard, IllegalMove, PASS_MOVE
+from features import (
+    NUM_SYMMETRIES,
+    move_to_index,
+    transform_actions,
+    transform_policies,
+    transform_states,
+)
 
 
 class TestPositionalSuperko(unittest.TestCase):
@@ -83,6 +92,50 @@ class TestPositionalSuperko(unittest.TestCase):
             legal = board.legal_moves()
             mv = rng.choice(legal)
             board.play(mv[0], mv[1])  # must not raise (chosen from legal_moves)
+
+
+class TestSymmetry(unittest.TestCase):
+    size = 5
+
+    def test_identity(self):
+        rng = np.random.RandomState(0)
+        s = rng.rand(2, self.size, self.size, 3).astype(np.float32)
+        np.testing.assert_array_equal(transform_states(s, 0), s)
+        p = rng.rand(2, self.size * self.size + 1).astype(np.float32)
+        np.testing.assert_array_equal(transform_policies(p, 0, self.size), p)
+        a = np.array([0, 7, self.size * self.size])
+        np.testing.assert_array_equal(transform_actions(a, 0, self.size), a)
+
+    def test_state_policy_action_consistency(self):
+        n = self.size * self.size
+        for (x, y) in [(0, 0), (1, 3), (4, 2), (2, 2), (3, 0)]:
+            idx = move_to_index((x, y), self.size)
+            state = np.zeros((1, self.size, self.size, 3), dtype=np.float32)
+            state[0, y, x, 0] = 1.0
+            policy = np.zeros((1, n + 1), dtype=np.float32)
+            policy[0, idx] = 1.0
+            for t in range(NUM_SYMMETRIES):
+                ts = transform_states(state, t)[0]
+                tp = transform_policies(policy, t, self.size)[0]
+                ta = int(transform_actions(np.array([idx]), t, self.size)[0])
+                ys, xs = np.argwhere(ts[:, :, 0] == 1.0)[0]
+                stone_idx = move_to_index((int(xs), int(ys)), self.size)
+                self.assertEqual(stone_idx, int(np.argmax(tp[:n])))
+                self.assertEqual(stone_idx, ta)
+
+    def test_pass_preserved(self):
+        n = self.size * self.size
+        p = np.zeros((1, n + 1), dtype=np.float32)
+        p[0, n] = 1.0
+        for t in range(NUM_SYMMETRIES):
+            self.assertEqual(int(np.argmax(transform_policies(p, t, self.size)[0])), n)
+            self.assertEqual(int(transform_actions(np.array([n]), t, self.size)[0]), n)
+
+    def test_action_map_is_permutation(self):
+        n = self.size * self.size
+        for t in range(NUM_SYMMETRIES):
+            mapped = transform_actions(np.arange(n), t, self.size)
+            self.assertEqual(sorted(mapped.tolist()), list(range(n)))
 
 
 if __name__ == "__main__":

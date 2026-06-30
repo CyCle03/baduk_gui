@@ -13,6 +13,12 @@ import tensorflow as tf
 
 import mcts
 from engine import GoBoard, BLACK, WHITE, PASS_MOVE
+from features import (
+    NUM_SYMMETRIES,
+    transform_actions,
+    transform_policies,
+    transform_states,
+)
 from rl_model import (
     encode_board,
     index_to_move,
@@ -21,6 +27,22 @@ from rl_model import (
     make_infer_fn,
     move_to_index,
 )
+
+
+def _augment_batch(states, actions, policy_targets, board_size):
+    """Apply one random dihedral symmetry to a training batch (data augmentation).
+
+    States, policy targets, and sparse actions are transformed consistently.
+    """
+    t = int(np.random.randint(0, NUM_SYMMETRIES))
+    if t == 0:
+        return states, actions, policy_targets
+    states = transform_states(states, t)
+    if policy_targets is not None:
+        policy_targets = transform_policies(policy_targets, t, board_size)
+    if actions is not None and len(actions) > 0:
+        actions = transform_actions(actions, t, board_size)
+    return states, actions, policy_targets
 
 DEFAULT_BOARD_SIZE = 19
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -468,6 +490,7 @@ def train(
     mcts_temperature_moves: int = DEFAULT_MCTS_TEMP_MOVES,
     mcts_batch: int = DEFAULT_MCTS_BATCH,
     superko: bool = True,
+    augment: bool = False,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     train_steps: int = DEFAULT_TRAIN_STEPS,
@@ -597,6 +620,10 @@ def train(
                         b_states, b_actions, b_policy_targets, b_rewards, b_value_targets = buffer.sample(
                             batch_size
                         )
+                        if augment:
+                            b_states, b_actions, b_policy_targets = _augment_batch(
+                                b_states, b_actions, b_policy_targets, board_size
+                            )
                         with tf.GradientTape() as tape:
                             logits, values = model(b_states, training=True)
                             if b_policy_targets is not None:
@@ -615,6 +642,10 @@ def train(
                         grads = tape.gradient(loss, model.trainable_variables)
                         optimizer.apply_gradients(zip(grads, model.trainable_variables))
                 elif not train_only:
+                    if augment:
+                        states, actions, policy_targets = _augment_batch(
+                            states, actions, policy_targets, board_size
+                        )
                     with tf.GradientTape() as tape:
                         logits, values = model(states, training=True)
                         if policy_targets is not None:
@@ -757,6 +788,11 @@ if __name__ == "__main__":
         default=True,
         help="use positional superko in self-play (forbid recreating any prior position)",
     )
+    parser.add_argument(
+        "--augment",
+        action="store_true",
+        help="augment training batches with random 8-fold board symmetries",
+    )
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS, help="conv channels (new models)")
     parser.add_argument("--blocks", type=int, default=DEFAULT_BLOCKS, help="residual blocks (new models)")
     parser.add_argument(
@@ -833,6 +869,7 @@ if __name__ == "__main__":
             mcts_temperature_moves=args.mcts_temp_moves,
             mcts_batch=args.mcts_batch,
             superko=args.superko,
+            augment=args.augment,
             channels=args.channels,
             blocks=args.blocks,
             eval_every=args.eval_every,
