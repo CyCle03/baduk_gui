@@ -14,6 +14,7 @@ from features import (
     index_to_move,
     encode_board,
     legal_moves_mask,
+    safe_choice,
 )
 
 
@@ -128,5 +129,5 @@ class PolicyAI:
         outputs = self.model(state[None, ...], training=False)
         logits = outputs[0].numpy()[0]
         probs = masked_softmax(logits, mask, self.temperature)
-        idx = int(np.random.choice(len(probs), p=probs))
+        idx = safe_choice(probs)
         return index_to_move(idx, board.size)
