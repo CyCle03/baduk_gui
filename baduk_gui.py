@@ -273,7 +273,12 @@ def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     probs = exps * mask
     total = np.sum(probs)
     if total <= 0:
-        return mask / np.sum(mask)
+        mask_total = np.sum(mask)
+        if mask_total <= 0:
+            # No legal action at all; return zeros so callers can detect it
+            # instead of producing NaN via a 0/0 divide.
+            return np.zeros_like(mask)
+        return mask / mask_total
     return probs / total
 
 
@@ -499,6 +504,11 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
         state = encode_board(board)
         mask = legal_moves_mask(board)
         mask[board.size * board.size] = 0.0
+        # No legal non-pass move (e.g. a full/small board): passing is the only
+        # option, so don't feed an all-zero mask to _masked_softmax (that yields
+        # NaN and safe_choice would then pick an illegal, occupied point).
+        if np.sum(mask) <= 0:
+            return PASS_MOVE
         logits, _value = forward_numpy(ai.model, state[None, ...])
         probs = _masked_softmax(logits[0], mask)
         idx = safe_choice(probs)
