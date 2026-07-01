@@ -37,6 +37,7 @@ try:
     from rl_model import (
         PolicyAI,
         encode_board,
+        forward_numpy,
         index_to_move,
         legal_moves_mask,
         make_infer_fn,
@@ -44,12 +45,13 @@ try:
 except Exception:
     PolicyAI = None
     encode_board = None
+    forward_numpy = None
     index_to_move = None
     legal_moves_mask = None
     make_infer_fn = None
 
 
-# Cache one batched infer_fn per model so the tf.function isn't retraced each
+# Cache one batched infer_fn per model so inference setup isn't repeated each
 # move (keyed by object id; a reloaded model gets a fresh entry).
 _INFER_CACHE: Dict[int, object] = {}
 
@@ -478,10 +480,8 @@ def _estimate_win_prob(model, board: GoBoard) -> Optional[float]:
     if encode_board is None:
         return None
     state = encode_board(board)
-    outputs = model(state[None, ...], training=False)
-    if not isinstance(outputs, (list, tuple)) or len(outputs) < 2:
-        return None
-    value = float(outputs[1].numpy()[0][0])
+    _logits, values = forward_numpy(model, state[None, ...])
+    value = float(values[0][0])
     return 0.5 * (value + 1.0)
 
 
@@ -489,10 +489,8 @@ def _estimate_value(model, board: GoBoard) -> Optional[float]:
     if encode_board is None:
         return None
     state = encode_board(board)
-    outputs = model(state[None, ...], training=False)
-    if not isinstance(outputs, (list, tuple)) or len(outputs) < 2:
-        return None
-    return float(outputs[1].numpy()[0][0])
+    _logits, values = forward_numpy(model, state[None, ...])
+    return float(values[0][0])
 
 
 def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
@@ -500,8 +498,8 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
         state = encode_board(board)
         mask = legal_moves_mask(board)
         mask[board.size * board.size] = 0.0
-        logits, _value = ai.model(state[None, ...], training=False)
-        probs = _masked_softmax(logits.numpy()[0], mask)
+        logits, _value = forward_numpy(ai.model, state[None, ...])
+        probs = _masked_softmax(logits[0], mask)
         idx = safe_choice(probs)
         return index_to_move(idx, board.size)
     legal_non_pass = [m for m in board.legal_moves() if m != PASS_MOVE]
@@ -513,10 +511,10 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
 def _model_path_for_size(base_dir: str, board_size: int) -> str:
     # 19x19 keeps the legacy path; other sizes live under a per-size subfolder.
     # Mirrors train_selfplay.paths_for_size (kept inline to avoid importing the
-    # TensorFlow-heavy trainer module into the GUI).
+    # heavy trainer module into the GUI).
     if board_size == 19:
-        return os.path.join(base_dir, "models", "latest.keras")
-    return os.path.join(base_dir, "models", f"{board_size}x{board_size}", "latest.keras")
+        return os.path.join(base_dir, "models", "latest.pt")
+    return os.path.join(base_dir, "models", f"{board_size}x{board_size}", "latest.pt")
 
 
 class MainWindow(QWidget):
@@ -702,7 +700,7 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "MCTS 불가", "TensorFlow를 사용할 수 없습니다.")
             return False
         if not os.path.exists(self.model_path):
-            QMessageBox.information(self, "MCTS 불가", "models/latest.keras 파일이 없습니다.")
+            QMessageBox.information(self, "MCTS 불가", "models/latest.pt 파일이 없습니다.")
             return False
         if not isinstance(self.ai, PolicyAI):
             self.ai = self._make_ai()
@@ -990,7 +988,7 @@ class MainWindow(QWidget):
             return
         if not os.path.exists(self.model_path):
             self.model_status = "모델 없음"
-            QMessageBox.information(self, "모델 없음", "models/latest.keras 파일이 없습니다.")
+            QMessageBox.information(self, "모델 없음", "models/latest.pt 파일이 없습니다.")
             self._update_status()
             return
         if isinstance(self.ai, PolicyAI):

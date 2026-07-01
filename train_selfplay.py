@@ -9,7 +9,8 @@ from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn.functional as F
 
 import mcts
 from engine import GoBoard, BLACK, WHITE, PASS_MOVE
@@ -21,12 +22,16 @@ from features import (
     transform_states,
 )
 from rl_model import (
+    DEVICE,
+    PolicyValueNet,
     encode_board,
+    forward_numpy,
     index_to_move,
     legal_moves_mask,
     load_or_create_model,
     make_infer_fn,
     move_to_index,
+    save_model,
 )
 
 
@@ -48,7 +53,7 @@ def _augment_batch(states, actions, policy_targets, board_size):
 DEFAULT_BOARD_SIZE = 19
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
-MODEL_PATH = os.path.join(MODEL_DIR, "latest.keras")
+MODEL_PATH = os.path.join(MODEL_DIR, "latest.pt")
 CKPT_DIR = os.path.join(BASE_DIR, "checkpoints")
 SGF_DIR = os.path.join(BASE_DIR, "sgf")
 DEFAULT_SAVE_EVERY = 10
@@ -93,7 +98,7 @@ def paths_for_size(board_size: int) -> dict:
 
     19x19 keeps the historical (un-namespaced) locations for backward
     compatibility with existing checkpoints and the committed
-    models/latest.keras; other sizes live under a `{size}x{size}` subfolder so
+    models/latest.pt; other sizes live under a `{size}x{size}` subfolder so
     they never clobber each other.
     """
     if board_size == DEFAULT_BOARD_SIZE:
@@ -110,13 +115,75 @@ def paths_for_size(board_size: int) -> dict:
     model_dir = os.path.join(MODEL_DIR, tag)
     return {
         "model_dir": model_dir,
-        "model_path": os.path.join(model_dir, "latest.keras"),
+        "model_path": os.path.join(model_dir, "latest.pt"),
         "ckpt_dir": os.path.join(CKPT_DIR, tag),
         "sgf_dir": os.path.join(SGF_DIR, tag),
         "data_dir": os.path.join(DEFAULT_DATA_DIR, tag),
         "train_state_path": os.path.join(BASE_DIR, f"train_state_{tag}.json"),
         "train_state_backup_path": os.path.join(model_dir, "train_state_backup.json"),
     }
+
+
+def _save_training_checkpoint(ckpt_dir, model, optimizer, episode, max_to_keep=3):
+    """Save model+optimizer for resuming, keeping only the newest `max_to_keep`.
+
+    Replaces tf.train.CheckpointManager: the optimizer state lives here so an
+    interrupted run resumes mid-training, while the eval-able model snapshots
+    (`checkpoint_XXXXXX.pt`) are written separately via save_model.
+    """
+    os.makedirs(ckpt_dir, exist_ok=True)
+    path = os.path.join(ckpt_dir, f"ckpt_{episode:06d}.pt")
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "episode": episode,
+            "arch": {
+                "board_size": model.board_size,
+                "channels": model.channels,
+                "blocks": model.blocks,
+            },
+        },
+        path,
+    )
+    existing = sorted(
+        f for f in os.listdir(ckpt_dir) if f.startswith("ckpt_") and f.endswith(".pt")
+    )
+    for stale in existing[:-max_to_keep]:
+        try:
+            os.remove(os.path.join(ckpt_dir, stale))
+        except OSError:
+            pass
+    return path
+
+
+def _restore_training_checkpoint(ckpt_dir, model, optimizer):
+    """Restore model+optimizer from the latest checkpoint if compatible.
+
+    A checkpoint written for a different board size or architecture is skipped
+    (with a message) rather than crashing training, matching the old behaviour.
+    """
+    if not os.path.isdir(ckpt_dir):
+        return
+    ckpts = sorted(
+        f for f in os.listdir(ckpt_dir) if f.startswith("ckpt_") and f.endswith(".pt")
+    )
+    if not ckpts:
+        return
+    path = os.path.join(ckpt_dir, ckpts[-1])
+    try:
+        ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
+        arch = ckpt.get("arch", {})
+        if arch.get("board_size", model.board_size) != model.board_size:
+            raise ValueError("board size mismatch")
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+    except Exception as exc:
+        print(
+            f"Could not restore checkpoint {path} "
+            f"(likely a board-size/architecture change): {exc}. "
+            "Starting from a fresh model."
+        )
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -339,14 +406,47 @@ def _timed_infer(infer_fn):
     return wrapped
 
 
-def sample_action(model: tf.keras.Model, board: GoBoard, mask: Optional[np.ndarray] = None) -> Tuple[int, float]:
+def _optimize_batch(model, optimizer, states, actions, policy_targets, rewards, value_targets):
+    """One gradient step; returns (loss, policy_loss, value_loss) as floats.
+
+    Shared by the replay-buffer and single-episode training paths. Uses soft
+    policy targets (MCTS visit distributions) when available, otherwise a
+    reward-weighted cross-entropy on the sampled actions.
+    """
+    device = next(model.parameters()).device
+    model.train()
+    states_t = torch.as_tensor(np.asarray(states), dtype=torch.float32, device=device)
+    logits, values = model(states_t)
+
+    if policy_targets is not None:
+        targets = torch.as_tensor(np.asarray(policy_targets), dtype=torch.float32, device=device)
+        log_probs = F.log_softmax(logits, dim=-1)
+        policy_loss = -(targets * log_probs).sum(dim=-1).mean()
+    else:
+        actions_t = torch.as_tensor(np.asarray(actions), dtype=torch.long, device=device)
+        rewards_t = torch.as_tensor(np.asarray(rewards), dtype=torch.float32, device=device)
+        ce = F.cross_entropy(logits, actions_t, reduction="none")
+        policy_loss = (ce * rewards_t).mean()
+
+    values = values.squeeze(-1)
+    value_targets_t = torch.as_tensor(np.asarray(value_targets), dtype=torch.float32, device=device)
+    value_loss = ((values - value_targets_t) ** 2).mean()
+    loss = policy_loss + 0.5 * value_loss
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return float(loss.item()), float(policy_loss.item()), float(value_loss.item())
+
+
+def sample_action(model: PolicyValueNet, board: GoBoard, mask: Optional[np.ndarray] = None) -> Tuple[int, float]:
     state = encode_board(board)
     if mask is None:
         mask = legal_moves_mask(board)
     _t0 = time.perf_counter()
-    logits, value = model(state[None, ...], training=False)
-    logits = logits.numpy()[0]
-    value = float(value.numpy()[0][0])
+    logits, values = forward_numpy(model, state[None, ...])
+    logits = logits[0]
+    value = float(values[0][0])
     _NN_TIME_ACC[0] += time.perf_counter() - _t0
     probs = _masked_softmax(logits, mask)
     return safe_choice(probs), value
@@ -361,7 +461,7 @@ def _render_progress_bar(current: int, total: int, width: int = 20) -> str:
 
 
 def play_episode(
-    model: tf.keras.Model,
+    model: PolicyValueNet,
     board_size: int,
     komi: float,
     max_moves: int = DEFAULT_MAX_MOVES,
@@ -449,6 +549,13 @@ def play_episode(
             mask = legal_moves_mask(board)
             if not pass_allowed:
                 mask[move_to_index(PASS_MOVE, board.size)] = 0.0
+            # If disallowing pass left no legal move (e.g. a small board filled
+            # up before pass_min_moves), re-allow pass so the mask isn't all
+            # zero. Otherwise _masked_softmax degenerates and safe_choice falls
+            # back to a uniform pick over illegal cells, crashing board.play().
+            # Mirrors the MCTS branch's empty-mask fallback above.
+            if np.sum(mask) <= 0:
+                mask[move_to_index(PASS_MOVE, board.size)] = 1.0
             action_idx, value = sample_action(model, board, mask)
 
         if resign_threshold > 0 and move_count >= resign_start and value <= -resign_threshold:
@@ -570,25 +677,11 @@ def train(
     train_state = _load_train_state(train_state_path)
 
     model = load_or_create_model(model_path, board_size, channels, blocks)
-    optimizer = tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE)
-    # Build variables before restoring optimizer state.
-    _ = model(tf.zeros((1, board_size, board_size, 3)))
+    optimizer = torch.optim.Adam(model.parameters(), lr=DEFAULT_LEARNING_RATE)
     infer_fn = _timed_infer(make_infer_fn(model))
-    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    manager = tf.train.CheckpointManager(checkpoint, ckpt_dir, max_to_keep=3)
-    if manager.latest_checkpoint:
-        # The checkpoint may have been written for a different board size or
-        # network shape (e.g. switching --board-size / --channels / --blocks).
-        # In that case restoring would raise on the first mismatched variable;
-        # fall back to the freshly-built model instead of crashing.
-        try:
-            checkpoint.restore(manager.latest_checkpoint).expect_partial()
-        except Exception as exc:
-            print(
-                f"Could not restore checkpoint {manager.latest_checkpoint} "
-                f"(likely a board-size/architecture change): {exc}. "
-                "Starting from a fresh model."
-            )
+    # Restore model+optimizer from the latest checkpoint. A checkpoint written
+    # for a different board size / architecture is skipped instead of crashing.
+    _restore_training_checkpoint(ckpt_dir, model, optimizer)
     last_episode = 0
 
     start_time = time.perf_counter()
@@ -597,7 +690,7 @@ def train(
     buffer = ReplayBuffer(buffer_size, use_policy_targets=use_policy_targets)
     csv_writer = None
     csv_file = None
-    cuda_enabled = bool(tf.config.list_physical_devices("GPU"))
+    cuda_enabled = torch.cuda.is_available()
     if log_csv == DEFAULT_LOG_CSV:
         log_csv = DEFAULT_LOG_CUDA_CSV if cuda_enabled else DEFAULT_LOG_CPU_CSV
 
@@ -681,6 +774,7 @@ def train(
                         data_dir, episode, states, actions, policy_targets, rewards, value_targets
                     )
 
+            loss = policy_loss = value_loss = 0.0
             if not selfplay_only:
                 if len(buffer) >= batch_size:
                     for _ in range(train_steps):
@@ -691,59 +785,25 @@ def train(
                             b_states, b_actions, b_policy_targets = _augment_batch(
                                 b_states, b_actions, b_policy_targets, board_size
                             )
-                        with tf.GradientTape() as tape:
-                            logits, values = model(b_states, training=True)
-                            if b_policy_targets is not None:
-                                targets = tf.convert_to_tensor(b_policy_targets, dtype=tf.float32)
-                                log_probs = tf.nn.log_softmax(logits)
-                                policy_loss = -tf.reduce_mean(tf.reduce_sum(targets * log_probs, axis=-1))
-                            else:
-                                ce = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                                    labels=b_actions, logits=logits
-                                )
-                                policy_loss = tf.reduce_mean(ce * b_rewards)
-                            values = tf.squeeze(values, axis=-1)
-                            value_loss = tf.reduce_mean(tf.square(values - b_value_targets))
-                            loss = policy_loss + 0.5 * value_loss
-
-                        grads = tape.gradient(loss, model.trainable_variables)
-                        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                        loss, policy_loss, value_loss = _optimize_batch(
+                            model, optimizer, b_states, b_actions,
+                            b_policy_targets, b_rewards, b_value_targets,
+                        )
                 elif not train_only:
                     if augment:
                         states, actions, policy_targets = _augment_batch(
                             states, actions, policy_targets, board_size
                         )
-                    with tf.GradientTape() as tape:
-                        logits, values = model(states, training=True)
-                        if policy_targets is not None:
-                            targets = tf.convert_to_tensor(policy_targets, dtype=tf.float32)
-                            log_probs = tf.nn.log_softmax(logits)
-                            policy_loss = -tf.reduce_mean(tf.reduce_sum(targets * log_probs, axis=-1))
-                        else:
-                            ce = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                                labels=actions, logits=logits
-                            )
-                            policy_loss = tf.reduce_mean(ce * rewards)
-                        values = tf.squeeze(values, axis=-1)
-                        value_loss = tf.reduce_mean(tf.square(values - value_targets))
-                        loss = policy_loss + 0.5 * value_loss
-
-                    grads = tape.gradient(loss, model.trainable_variables)
-                    optimizer.apply_gradients(zip(grads, model.trainable_variables))
-                else:
-                    loss = tf.constant(0.0)
-                    policy_loss = tf.constant(0.0)
-                    value_loss = tf.constant(0.0)
-            else:
-                loss = tf.constant(0.0)
-                policy_loss = tf.constant(0.0)
-                value_loss = tf.constant(0.0)
+                    loss, policy_loss, value_loss = _optimize_batch(
+                        model, optimizer, states, actions,
+                        policy_targets, rewards, value_targets,
+                    )
 
             if not selfplay_only and episode % save_every == 0:
-                model.save(model_path)
-                checkpoint_path = os.path.join(model_dir, f"checkpoint_{episode:06d}.keras")
-                model.save(checkpoint_path)
-                manager.save(checkpoint_number=episode)
+                save_model(model, model_path)
+                checkpoint_path = os.path.join(model_dir, f"checkpoint_{episode:06d}.pt")
+                save_model(model, checkpoint_path)
+                _save_training_checkpoint(ckpt_dir, model, optimizer, episode)
                 if not train_only:
                     _save_sgf(moves, score_diff, episode, board_size, komi, sgf_dir)
                 _save_train_state(train_state_path, train_state)
@@ -778,8 +838,8 @@ def train(
                 recent_times.pop(0)
             recent_avg = sum(recent_times) / len(recent_times)
             print(
-                f"episode={episode} loss={loss.numpy():.4f} policy={policy_loss.numpy():.4f} "
-                f"value={value_loss.numpy():.4f} score_diff={score_diff:.1f} moves={len(actions)} "
+                f"episode={episode} loss={loss:.4f} policy={policy_loss:.4f} "
+                f"value={value_loss:.4f} score_diff={score_diff:.1f} moves={len(actions)} "
                 f"episode_time={episode_time:.2f}s nn_time={nn_time:.2f}s board_time={board_time:.2f}s "
                 f"total_time={total_time:.2f}s "
                 f"avg_time={avg_time:.2f}s recent10_avg={recent_avg:.2f}s"
@@ -788,9 +848,9 @@ def train(
                 csv_writer.writerow(
                     {
                         "episode": episode,
-                        "loss": f"{loss.numpy():.4f}",
-                        "policy": f"{policy_loss.numpy():.4f}",
-                        "value": f"{value_loss.numpy():.4f}",
+                        "loss": f"{loss:.4f}",
+                        "policy": f"{policy_loss:.4f}",
+                        "value": f"{value_loss:.4f}",
                         "score_diff": f"{score_diff:.1f}",
                         "moves": len(actions),
                         "episode_time": f"{episode_time:.2f}",
@@ -812,10 +872,10 @@ def train(
         if csv_file is not None:
             csv_file.close()
         if last_episode > 0:
-            model.save(model_path)
-            checkpoint_path = os.path.join(model_dir, f"checkpoint_{last_episode:06d}.keras")
-            model.save(checkpoint_path)
-            manager.save(checkpoint_number=last_episode)
+            save_model(model, model_path)
+            checkpoint_path = os.path.join(model_dir, f"checkpoint_{last_episode:06d}.pt")
+            save_model(model, checkpoint_path)
+            _save_training_checkpoint(ckpt_dir, model, optimizer, last_episode)
             _save_train_state(train_state_path, train_state)
             _backup_train_state(train_state_path, train_state_backup_path)
 

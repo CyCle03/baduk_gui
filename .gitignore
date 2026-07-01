@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 models/
-!models/latest.keras
+!models/latest.pt
 checkpoints/
 sgf/
 *.h5

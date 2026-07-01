@@ -6,7 +6,7 @@ from engine import star_points
 try:
     from train_selfplay import MODEL_DIR, MODEL_PATH, paths_for_size, size_tag
     _HAVE_TRAINER = True
-except Exception:  # tensorflow not installed in this environment
+except Exception:  # torch not installed in this environment
     _HAVE_TRAINER = False
 
 
@@ -40,7 +40,7 @@ class TestStarPoints(unittest.TestCase):
                 self.assertTrue(0 <= x < n and 0 <= y < n, msg=f"oob for n={n}")
 
 
-@unittest.skipUnless(_HAVE_TRAINER, "train_selfplay (tensorflow) not importable")
+@unittest.skipUnless(_HAVE_TRAINER, "train_selfplay (torch) not importable")
 class TestPerSizePaths(unittest.TestCase):
     def test_19_uses_legacy_paths(self):
         p = paths_for_size(19)
@@ -52,7 +52,7 @@ class TestPerSizePaths(unittest.TestCase):
             p = paths_for_size(n)
             tag = size_tag(n)
             self.assertEqual(p["model_dir"], os.path.join(MODEL_DIR, tag))
-            self.assertEqual(p["model_path"], os.path.join(MODEL_DIR, tag, "latest.keras"))
+            self.assertEqual(p["model_path"], os.path.join(MODEL_DIR, tag, "latest.pt"))
             self.assertTrue(p["ckpt_dir"].endswith(tag))
             self.assertTrue(p["data_dir"].endswith(tag))
             self.assertIn(tag, p["train_state_path"])

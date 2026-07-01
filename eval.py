@@ -6,8 +6,8 @@ uses the engine's RandomAI. Players swap colors every game for fairness, and an
 optional fixed seed makes a run reproducible.
 
 Examples:
-    python eval.py --p1 models/latest.keras --p2 random --games 40 --seed 0
-    python eval.py --p1 models/latest.keras --p2 models/checkpoint_000100.keras
+    python eval.py --p1 models/latest.pt --p2 random --games 40 --seed 0
+    python eval.py --p1 models/latest.pt --p2 models/checkpoint_000100.pt
 """
 
 import argparse
@@ -38,10 +38,11 @@ class DeterministicPolicyPlayer:
 
     def select_move(self, board: GoBoard) -> Tuple[int, int]:
         from features import encode_board, index_to_move, legal_moves_mask
+        from rl_model import forward_numpy
 
         state = encode_board(board)
         mask = legal_moves_mask(board)
-        logits = self.model(state[None, ...], training=False)[0].numpy()[0]
+        logits = forward_numpy(self.model, state[None, ...])[0][0]
 
         masked = np.where(mask > 0, logits, -np.inf)
         pass_idx = board.size * board.size
@@ -57,7 +58,7 @@ class DeterministicPolicyPlayer:
 def make_player(spec: str, board_size: int):
     if spec == "random":
         return RandomAI(), "random"
-    # Imported lazily so a `random`-only evaluation does not require TF.
+    # Imported lazily so a `random`-only evaluation does not require torch.
     from rl_model import load_or_create_model
 
     model = load_or_create_model(spec, board_size)
@@ -218,8 +219,8 @@ def _log_csv(
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate two Go players")
-    parser.add_argument("--p1", required=True, help="'random' or a path to a .keras model")
-    parser.add_argument("--p2", default="random", help="'random' or a path to a .keras model")
+    parser.add_argument("--p1", required=True, help="'random' or a path to a .pt model")
+    parser.add_argument("--p2", default="random", help="'random' or a path to a .pt model")
     parser.add_argument("--games", type=int, default=DEFAULT_GAMES, help="number of games")
     parser.add_argument("--board-size", type=int, default=DEFAULT_BOARD_SIZE, help="board size")
     parser.add_argument("--komi", type=float, default=DEFAULT_KOMI, help="komi")
