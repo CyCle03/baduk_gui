@@ -521,7 +521,18 @@ def train(
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
     manager = tf.train.CheckpointManager(checkpoint, CKPT_DIR, max_to_keep=3)
     if manager.latest_checkpoint:
-        checkpoint.restore(manager.latest_checkpoint)
+        # The checkpoint may have been written for a different board size or
+        # network shape (e.g. switching --board-size / --channels / --blocks).
+        # In that case restoring would raise on the first mismatched variable;
+        # fall back to the freshly-built model instead of crashing.
+        try:
+            checkpoint.restore(manager.latest_checkpoint).expect_partial()
+        except Exception as exc:
+            print(
+                f"Could not restore checkpoint {manager.latest_checkpoint} "
+                f"(likely a board-size/architecture change): {exc}. "
+                "Starting from a fresh model."
+            )
     last_episode = 0
 
     start_time = time.perf_counter()
