@@ -81,6 +81,8 @@ Optional flags:
 - `--buffer-size 5000`
 - `--batch-size 256`
 - `--train-steps 1`
+- `--weight-decay 1e-4` / `--entropy-coef 0.01` / `--grad-clip 5.0` — collapse
+  guards (L2, policy-entropy bonus, gradient clipping); set to `0` to disable
 - `--resign-threshold 0.99`
 - `--resign-start 250`
 - `--resign-score-check-moves 30` (skip resign near the end when area score favors current player)

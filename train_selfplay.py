@@ -60,6 +60,11 @@ DEFAULT_SAVE_EVERY = 10
 DEFAULT_MAX_MOVES = 300
 DEFAULT_KOMI = 6.5
 DEFAULT_LEARNING_RATE = 1e-4
+# Collapse guards (see _optimize_batch): L2 weight decay, a policy-entropy bonus,
+# and gradient-norm clipping. Active by default; set to 0 to disable.
+DEFAULT_WEIGHT_DECAY = 1e-4
+DEFAULT_ENTROPY_COEF = 0.01
+DEFAULT_GRAD_CLIP = 5.0
 DEFAULT_PASS_START = 300
 DEFAULT_PASS_MIN_MOVES = 150
 DEFAULT_VALUE_WINDOW = 20
@@ -419,21 +424,28 @@ def _timed_infer(infer_fn):
     return wrapped
 
 
-def _optimize_batch(model, optimizer, states, actions, policy_targets, rewards, value_targets):
+def _optimize_batch(
+    model, optimizer, states, actions, policy_targets, rewards, value_targets,
+    entropy_coef: float = 0.0, grad_clip: float = 0.0,
+):
     """One gradient step; returns (loss, policy_loss, value_loss) as floats.
 
     Shared by the replay-buffer and single-episode training paths. Uses soft
     policy targets (MCTS visit distributions) when available, otherwise a
     reward-weighted cross-entropy on the sampled actions.
+
+    Collapse guards: an optional policy-entropy bonus (``entropy_coef``) keeps
+    the policy from collapsing onto a single move, and gradient-norm clipping
+    (``grad_clip``) caps runaway updates. Weight decay lives on the optimizer.
     """
     device = next(model.parameters()).device
     model.train()
     states_t = torch.as_tensor(np.asarray(states), dtype=torch.float32, device=device)
     logits, values = model(states_t)
+    log_probs = F.log_softmax(logits, dim=-1)
 
     if policy_targets is not None:
         targets = torch.as_tensor(np.asarray(policy_targets), dtype=torch.float32, device=device)
-        log_probs = F.log_softmax(logits, dim=-1)
         policy_loss = -(targets * log_probs).sum(dim=-1).mean()
     else:
         actions_t = torch.as_tensor(np.asarray(actions), dtype=torch.long, device=device)
@@ -446,8 +458,16 @@ def _optimize_batch(model, optimizer, states, actions, policy_targets, rewards, 
     value_loss = ((values - value_targets_t) ** 2).mean()
     loss = policy_loss + 0.5 * value_loss
 
+    # Entropy bonus: subtract the mean policy entropy so minimizing the loss
+    # keeps entropy up, resisting the degenerate "always play one point" collapse.
+    if entropy_coef > 0:
+        entropy = -(log_probs.exp() * log_probs).sum(dim=-1).mean()
+        loss = loss - entropy_coef * entropy
+
     optimizer.zero_grad()
     loss.backward()
+    if grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     return float(loss.item()), float(policy_loss.item()), float(value_loss.item())
 
@@ -674,6 +694,9 @@ def train(
     eval_every: int = 0,
     eval_games: int = DEFAULT_EVAL_GAMES,
     init_from: Optional[str] = None,
+    weight_decay: float = DEFAULT_WEIGHT_DECAY,
+    entropy_coef: float = DEFAULT_ENTROPY_COEF,
+    grad_clip: float = DEFAULT_GRAD_CLIP,
 ):
     # Per-board-size paths so different sizes don't overwrite each other.
     paths = paths_for_size(board_size)
@@ -699,7 +722,9 @@ def train(
         model = load_or_create_model(init_from, board_size, channels, blocks)
     else:
         model = load_or_create_model(model_path, board_size, channels, blocks)
-    optimizer = torch.optim.Adam(model.parameters(), lr=DEFAULT_LEARNING_RATE)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=weight_decay
+    )
     infer_fn = _timed_infer(make_infer_fn(model))
     # Restore model+optimizer from the latest checkpoint. A checkpoint written
     # for a different board size / architecture is skipped instead of crashing.
@@ -810,6 +835,7 @@ def train(
                         loss, policy_loss, value_loss = _optimize_batch(
                             model, optimizer, b_states, b_actions,
                             b_policy_targets, b_rewards, b_value_targets,
+                            entropy_coef=entropy_coef, grad_clip=grad_clip,
                         )
                 elif not train_only:
                     if augment:
@@ -819,6 +845,7 @@ def train(
                     loss, policy_loss, value_loss = _optimize_batch(
                         model, optimizer, states, actions,
                         policy_targets, rewards, value_targets,
+                        entropy_coef=entropy_coef, grad_clip=grad_clip,
                     )
 
             if not selfplay_only and episode % save_every == 0:
@@ -995,6 +1022,12 @@ if __name__ == "__main__":
         help="warm-start weights from another model (.pt), e.g. a 9x9 net to "
         "seed 19x19 training. Ignored if a model already exists for this size.",
     )
+    parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY,
+                        help="AdamW L2 weight decay (collapse guard; 0 to disable)")
+    parser.add_argument("--entropy-coef", type=float, default=DEFAULT_ENTROPY_COEF,
+                        help="policy entropy bonus (collapse guard; 0 to disable)")
+    parser.add_argument("--grad-clip", type=float, default=DEFAULT_GRAD_CLIP,
+                        help="max gradient norm (0 to disable clipping)")
     parser.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
@@ -1052,6 +1085,9 @@ if __name__ == "__main__":
             show_progress=args.progress,
             log_csv=log_csv,
             init_from=args.init_from,
+            weight_decay=args.weight_decay,
+            entropy_coef=args.entropy_coef,
+            grad_clip=args.grad_clip,
         )
 
     if args.profile:
