@@ -133,8 +133,11 @@ def _prune_loop(data_dir, keep, interval=30.0):
 def main():
     ap = argparse.ArgumentParser(description="Parallel self-play launcher (N workers + 1 trainer)")
     ap.add_argument("--board-size", type=int, default=9)
-    ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 2),
-                    help="number of self-play worker processes")
+    # Memory (not core count) is usually the limit on Windows: every worker is a
+    # separate Python+torch process. Start conservative; raise --workers if RAM
+    # allows, lower it if you hit "paging file too small" (WinError 1455).
+    ap.add_argument("--workers", type=int, default=min(4, max(1, (os.cpu_count() or 4) - 2)),
+                    help="number of self-play worker processes (raise if RAM allows)")
     ap.add_argument("--worker-episodes", type=int, default=20,
                     help="self-play games per worker batch; smaller = fresher model, more restarts")
     ap.add_argument("--train-episodes", type=int, default=40,
@@ -172,6 +175,13 @@ def main():
     worker_env = os.environ.copy()
     if not args.gpu_workers:
         worker_env["CUDA_VISIBLE_DEVICES"] = ""
+    # Each worker plays one game at a time, so pin it to a single BLAS/torch
+    # thread. Otherwise every worker spawns cpu_count intra-op threads, which
+    # oversubscribes the cores and multiplies committed memory across N workers
+    # (the usual cause of WinError 1455 "paging file too small"). One thread per
+    # worker also maps N workers cleanly onto N cores.
+    for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        worker_env[_var] = "1"
 
     def worker_cmd():
         return [
@@ -221,9 +231,11 @@ def main():
     threads.append(t)
 
     model_path = _model_path_for_size(size)
-    print(f"[parallel] {size}x{size} | workers={args.workers} "
+    print(f"[parallel] {size}x{size} | workers={args.workers}x1-thread "
           f"({'GPU' if args.gpu_workers else 'CPU'}) | trainer=GPU | pass_min={pass_min}")
     print(f"[parallel] data: {data_dir}  (worker logs in {log_dir})")
+    print("[parallel] If workers die with WinError 1455 (paging file too small): "
+          "lower --workers or raise the Windows paging file.")
     print("[parallel] Ctrl+C to stop.\n")
 
     def _on_sigint(signum, frame):

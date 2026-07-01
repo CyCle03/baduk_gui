@@ -176,10 +176,16 @@ python parallel_train.py --board-size 19 --workers 8 --init-from models/9x9/late
 
 Workers restart in short batches so they pick up the trainer's newest
 `latest.pt`, and default to CPU inference so the GPU is reserved for the trainer
-(`--gpu-workers` to share it). Per-worker logs go to
+(`--gpu-workers` to share it). Each worker is pinned to a single BLAS thread, so
+`--workers N` maps cleanly onto N cores. Per-worker logs go to
 `data/parallel_<size>/worker_logs/`; the trainer's loss stays on the console.
 Stop with Ctrl+C. Use `--workers`, `--mcts-sims`, `--worker-episodes`, and
 `--keep-data` to tune throughput and disk use.
+
+Memory, not core count, is usually the limit on Windows (each worker is its own
+Python+torch process). `--workers` defaults conservatively; raise it if RAM
+allows. If workers die with `WinError 1455` ("paging file too small"), lower
+`--workers` or increase the Windows paging file.
 
 ## Architecture notes
 
