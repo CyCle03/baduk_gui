@@ -12,7 +12,7 @@ Baduk (Go) GUI with self-play reinforcement learning.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install PyQt6 tensorflow
+.venv/bin/pip install PyQt6 torch
 ```
 
 ## Run GUI
@@ -22,7 +22,7 @@ python3 -m venv .venv
 ```
 
 GUI controls:
-- `MODEL RELOAD`: reloads `models/latest.keras`
+- `MODEL RELOAD`: reloads `models/latest.pt`
 - `AI vs AI`: toggles self-play viewing
 - `TRAIN (GUI)`: starts/stops background training
 - `MCTS (AI)`: toggles MCTS move selection (PolicyAI only)
@@ -95,8 +95,8 @@ Optional flags:
 - `--progress` / `--no-progress`
 
 Models are saved to:
-- `models/latest.keras` (latest)
-- `models/checkpoint_XXXXXX.keras` (every N episodes)
+- `models/latest.pt` (latest)
+- `models/checkpoint_XXXXXX.pt` (every N episodes)
 Optimizer checkpoints are saved to:
 - `checkpoints/` (TensorFlow checkpoint, auto-resume)
 
@@ -123,13 +123,13 @@ Self-play data modes:
 
 ## Evaluation
 
-Pit two players (a `.keras` model or `random`) against each other with
+Pit two players (a `.pt` model or `random`) against each other with
 deterministic play (argmax legal move, no Dirichlet/temperature), alternating
 colors for fairness:
 
 ```bash
-python eval.py --p1 models/latest.keras --p2 random --games 40 --seed 0
-python eval.py --p1 models/latest.keras --p2 models/checkpoint_000100.keras --games 40
+python eval.py --p1 models/latest.pt --p2 random --games 40 --seed 0
+python eval.py --p1 models/latest.pt --p2 models/checkpoint_000100.pt --games 40
 ```
 
 Results (P1 winrate, average margin) are appended to `logs/eval_log.csv`. With a
@@ -160,7 +160,7 @@ Star points (hoshi) adapt to the board size automatically.
 
 - Training is CPU-only unless TensorFlow detects a GPU.
 - Default max moves per game is 300.
-- Model files are ignored by git (`models/`, `*.keras`).
+- Model files are ignored by git (`models/`, `*.keras`, `*.pt`).
 
 ---
 
@@ -178,7 +178,7 @@ Baduk (바둑) GUI와 자가대국 강화학습 예제입니다.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install PyQt6 tensorflow
+.venv/bin/pip install PyQt6 torch
 ```
 
 ### GUI 실행
@@ -188,7 +188,7 @@ python3 -m venv .venv
 ```
 
 버튼 안내:
-- `MODEL RELOAD`: `models/latest.keras` 다시 불러오기
+- `MODEL RELOAD`: `models/latest.pt` 다시 불러오기
 - `AI vs AI`: 자가대국 보기 토글
 - `TRAIN (GUI)`: GUI에서 학습 시작/중지
 - `MCTS (AI)`: MCTS 수 선택 토글(PolicyAI 필요)
@@ -236,8 +236,8 @@ GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합
 - `--progress` / `--no-progress`
 
 모델 저장 위치:
-- `models/latest.keras` (최신)
-- `models/checkpoint_XXXXXX.keras` (N 에피소드마다)
+- `models/latest.pt` (최신)
+- `models/checkpoint_XXXXXX.pt` (N 에피소드마다)
 옵티마이저 체크포인트:
 - `checkpoints/` (TensorFlow 체크포인트, 재시작 시 이어짐)
 

@@ -1,4 +1,5 @@
 import csv
+import json
 import math
 import random
 import os
@@ -37,6 +38,7 @@ try:
     from rl_model import (
         PolicyAI,
         encode_board,
+        forward_numpy,
         index_to_move,
         legal_moves_mask,
         make_infer_fn,
@@ -44,12 +46,13 @@ try:
 except Exception:
     PolicyAI = None
     encode_board = None
+    forward_numpy = None
     index_to_move = None
     legal_moves_mask = None
     make_infer_fn = None
 
 
-# Cache one batched infer_fn per model so the tf.function isn't retraced each
+# Cache one batched infer_fn per model so inference setup isn't repeated each
 # move (keyed by object id; a reloaded model gets a fresh entry).
 _INFER_CACHE: Dict[int, object] = {}
 
@@ -76,6 +79,17 @@ GUI_VALUE_MARGIN = 0.6
 GUI_RESIGN_THRESHOLD = 0.99
 GUI_RESIGN_START = 250
 GUI_LOG_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "gui_log.csv")
+
+# The move-count thresholds above (pass_min_moves, pass_start, resign_start) are
+# tuned for a 19x19 board. A small board fills up in far fewer moves, so a fixed
+# 150/300/250 would never be reached there -- the AI would never auto-pass or
+# resign and games would grind until the board is full. Scale them by board area.
+GUI_REF_BOARD_AREA = 19 * 19
+
+
+def _scale_threshold(ref_value: int, board_size: int) -> int:
+    """Scale a 19x19-tuned move-count threshold to `board_size` by board area."""
+    return max(1, round(ref_value * board_size * board_size / GUI_REF_BOARD_AREA))
 
 # ----------------------------
 # GUI (PyQt6)
@@ -270,7 +284,12 @@ def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     probs = exps * mask
     total = np.sum(probs)
     if total <= 0:
-        return mask / np.sum(mask)
+        mask_total = np.sum(mask)
+        if mask_total <= 0:
+            # No legal action at all; return zeros so callers can detect it
+            # instead of producing NaN via a 0/0 divide.
+            return np.zeros_like(mask)
+        return mask / mask_total
     return probs / total
 
 
@@ -478,10 +497,8 @@ def _estimate_win_prob(model, board: GoBoard) -> Optional[float]:
     if encode_board is None:
         return None
     state = encode_board(board)
-    outputs = model(state[None, ...], training=False)
-    if not isinstance(outputs, (list, tuple)) or len(outputs) < 2:
-        return None
-    value = float(outputs[1].numpy()[0][0])
+    _logits, values = forward_numpy(model, state[None, ...])
+    value = float(values[0][0])
     return 0.5 * (value + 1.0)
 
 
@@ -489,10 +506,8 @@ def _estimate_value(model, board: GoBoard) -> Optional[float]:
     if encode_board is None:
         return None
     state = encode_board(board)
-    outputs = model(state[None, ...], training=False)
-    if not isinstance(outputs, (list, tuple)) or len(outputs) < 2:
-        return None
-    return float(outputs[1].numpy()[0][0])
+    _logits, values = forward_numpy(model, state[None, ...])
+    return float(values[0][0])
 
 
 def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
@@ -500,8 +515,13 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
         state = encode_board(board)
         mask = legal_moves_mask(board)
         mask[board.size * board.size] = 0.0
-        logits, _value = ai.model(state[None, ...], training=False)
-        probs = _masked_softmax(logits.numpy()[0], mask)
+        # No legal non-pass move (e.g. a full/small board): passing is the only
+        # option, so don't feed an all-zero mask to _masked_softmax (that yields
+        # NaN and safe_choice would then pick an illegal, occupied point).
+        if np.sum(mask) <= 0:
+            return PASS_MOVE
+        logits, _value = forward_numpy(ai.model, state[None, ...])
+        probs = _masked_softmax(logits[0], mask)
         idx = safe_choice(probs)
         return index_to_move(idx, board.size)
     legal_non_pass = [m for m in board.legal_moves() if m != PASS_MOVE]
@@ -513,10 +533,18 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
 def _model_path_for_size(base_dir: str, board_size: int) -> str:
     # 19x19 keeps the legacy path; other sizes live under a per-size subfolder.
     # Mirrors train_selfplay.paths_for_size (kept inline to avoid importing the
-    # TensorFlow-heavy trainer module into the GUI).
+    # heavy trainer module into the GUI).
     if board_size == 19:
-        return os.path.join(base_dir, "models", "latest.keras")
-    return os.path.join(base_dir, "models", f"{board_size}x{board_size}", "latest.keras")
+        return os.path.join(base_dir, "models", "latest.pt")
+    return os.path.join(base_dir, "models", f"{board_size}x{board_size}", "latest.pt")
+
+
+def _train_state_path_for_size(base_dir: str, board_size: int) -> str:
+    # Cumulative-episode counter lives per board size, mirroring
+    # train_selfplay.paths_for_size: 19x19 keeps the un-namespaced filename.
+    if board_size == 19:
+        return os.path.join(base_dir, "train_state.json")
+    return os.path.join(base_dir, f"train_state_{board_size}x{board_size}.json")
 
 
 class MainWindow(QWidget):
@@ -528,8 +556,14 @@ class MainWindow(QWidget):
         )
 
         self.board = GoBoard(board_size)
+        # Board-size-scaled move thresholds (see _scale_threshold): keeps AI
+        # pass/resign behavior sensible on small boards, unchanged on 19x19.
+        self.pass_min_moves = _scale_threshold(GUI_PASS_MIN_MOVES, board_size)
+        self.pass_start = _scale_threshold(GUI_PASS_START, board_size)
+        self.resign_start = _scale_threshold(GUI_RESIGN_START, board_size)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.model_path = _model_path_for_size(base_dir, board_size)
+        self.train_state_path = _train_state_path_for_size(base_dir, board_size)
         self.train_script = os.path.join(base_dir, "train_selfplay.py")
         self.ai = self._make_ai()
         self.ai_vs_ai = False
@@ -658,16 +692,33 @@ class MainWindow(QWidget):
         if PolicyAI is not None and os.path.exists(self.model_path):
             return PolicyAI(self.model_path, board_size=self.board.size)
         return RandomAI(pass_prob=0.03)
+    def _read_total_episodes(self) -> Optional[int]:
+        """Cumulative episodes this board size's model has trained on.
+
+        Read live from the per-size train_state file so the count reflects the
+        background trainer's latest checkpoint. Returns None if unavailable.
+        """
+        try:
+            with open(self.train_state_path, encoding="utf-8") as f:
+                data = json.load(f)
+            value = data.get("total_episodes")
+            return int(value) if value is not None else None
+        except (OSError, ValueError, TypeError):
+            return None
+
     def _update_status(self):
         to_play = "흑(사람)" if self.board.to_play == BLACK else "백(AI)"
         train_state = "ON" if self.train_running else "OFF"
         mcts_state = f"ON ({self.mcts_simulations})" if self.use_mcts else "OFF"
+        episodes = self._read_total_episodes()
+        episodes_text = str(episodes) if episodes is not None else "0"
         sgf_state = ""
         if self.sgf_mode:
             sgf_state = f"\nSGF: {self.sgf_index}/{len(self.sgf_moves)}"
         self.status.setText(
             f"차례: {to_play}\n"
             f"진행 수: {self.board.move_count()}\n"
+            f"학습 판수: {episodes_text}\n"
             f"학습: {train_state}\n"
             f"학습 상태: {self.last_train_status}\n"
             f"MCTS: {mcts_state}\n"
@@ -702,7 +753,7 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "MCTS 불가", "TensorFlow를 사용할 수 없습니다.")
             return False
         if not os.path.exists(self.model_path):
-            QMessageBox.information(self, "MCTS 불가", "models/latest.keras 파일이 없습니다.")
+            QMessageBox.information(self, "MCTS 불가", "models/latest.pt 파일이 없습니다.")
             return False
         if not isinstance(self.ai, PolicyAI):
             self.ai = self._make_ai()
@@ -728,14 +779,14 @@ class MainWindow(QWidget):
     def _should_resign_selfplay(self, value: float) -> bool:
         if not self.ai_vs_ai:
             return False
-        if self.board.move_count() < GUI_RESIGN_START:
+        if self.board.move_count() < self.resign_start:
             return False
         return value <= -GUI_RESIGN_THRESHOLD
 
     def _should_pass_selfplay(self, value: float, pass_allowed: bool) -> bool:
         if not self.ai_vs_ai or not pass_allowed:
             return False
-        if self.board.move_count() < GUI_PASS_START:
+        if self.board.move_count() < self.pass_start:
             return False
         if len(self._recent_values) < GUI_VALUE_WINDOW:
             return False
@@ -889,7 +940,7 @@ class MainWindow(QWidget):
             return
         if self.board.to_play == BLACK and not self.ai_vs_ai:
             return
-        pass_allowed = not self.ai_vs_ai or self.board.move_count() >= GUI_PASS_MIN_MOVES
+        pass_allowed = not self.ai_vs_ai or self.board.move_count() >= self.pass_min_moves
         mv = None
         value = None
         if self.use_mcts and self._ensure_policy_ai():
@@ -990,7 +1041,7 @@ class MainWindow(QWidget):
             return
         if not os.path.exists(self.model_path):
             self.model_status = "모델 없음"
-            QMessageBox.information(self, "모델 없음", "models/latest.keras 파일이 없습니다.")
+            QMessageBox.information(self, "모델 없음", "models/latest.pt 파일이 없습니다.")
             self._update_status()
             return
         if isinstance(self.ai, PolicyAI):
@@ -1026,7 +1077,7 @@ class MainWindow(QWidget):
             return
 
         if PolicyAI is None:
-            QMessageBox.information(self, "학습 불가", "TensorFlow를 사용할 수 없습니다.")
+            QMessageBox.information(self, "학습 불가", "PyTorch를 사용할 수 없습니다.")
             return
         if not os.path.exists(self.train_script):
             QMessageBox.information(self, "학습 스크립트 없음", "train_selfplay.py를 찾을 수 없습니다.")
