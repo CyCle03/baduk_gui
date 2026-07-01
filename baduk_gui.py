@@ -31,6 +31,7 @@ from engine import (
 )
 
 import mcts
+from features import safe_choice
 
 try:
     from rl_model import (
@@ -469,7 +470,7 @@ def _mcts_pick_move(
     probs = _add_dirichlet_noise(probs, mask, GUI_MCTS_DIRICHLET_ALPHA, GUI_MCTS_DIRICHLET_EPS)
     if board.move_count() < GUI_MCTS_TEMP_MOVES:
         probs = _apply_temperature(probs, GUI_MCTS_TEMP)
-    action_idx = int(np.random.choice(len(probs), p=probs))
+    action_idx = safe_choice(probs)
     return index_to_move(action_idx, board.size), root_value
 
 
@@ -501,12 +502,21 @@ def _pick_non_pass_move(ai, board: GoBoard) -> Tuple[int, int]:
         mask[board.size * board.size] = 0.0
         logits, _value = ai.model(state[None, ...], training=False)
         probs = _masked_softmax(logits.numpy()[0], mask)
-        idx = int(np.random.choice(len(probs), p=probs))
+        idx = safe_choice(probs)
         return index_to_move(idx, board.size)
     legal_non_pass = [m for m in board.legal_moves() if m != PASS_MOVE]
     if legal_non_pass:
         return random.choice(legal_non_pass)
     return PASS_MOVE
+
+
+def _model_path_for_size(base_dir: str, board_size: int) -> str:
+    # 19x19 keeps the legacy path; other sizes live under a per-size subfolder.
+    # Mirrors train_selfplay.paths_for_size (kept inline to avoid importing the
+    # TensorFlow-heavy trainer module into the GUI).
+    if board_size == 19:
+        return os.path.join(base_dir, "models", "latest.keras")
+    return os.path.join(base_dir, "models", f"{board_size}x{board_size}", "latest.keras")
 
 
 class MainWindow(QWidget):
@@ -519,7 +529,7 @@ class MainWindow(QWidget):
 
         self.board = GoBoard(board_size)
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.model_path = os.path.join(base_dir, "models", "latest.keras")
+        self.model_path = _model_path_for_size(base_dir, board_size)
         self.train_script = os.path.join(base_dir, "train_selfplay.py")
         self.ai = self._make_ai()
         self.ai_vs_ai = False
@@ -1022,7 +1032,9 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "학습 스크립트 없음", "train_selfplay.py를 찾을 수 없습니다.")
             return
 
-        self._train_process.start(sys.executable, [self.train_script])
+        self._train_process.start(
+            sys.executable, [self.train_script, "--board-size", str(self.board_size)]
+        )
         if not self._train_process.waitForStarted(3000):
             QMessageBox.information(self, "학습 시작 실패", "학습 프로세스를 시작하지 못했습니다.")
             return

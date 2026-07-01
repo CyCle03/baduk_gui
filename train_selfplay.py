@@ -15,6 +15,7 @@ import mcts
 from engine import GoBoard, BLACK, WHITE, PASS_MOVE
 from features import (
     NUM_SYMMETRIES,
+    safe_choice,
     transform_actions,
     transform_policies,
     transform_states,
@@ -81,6 +82,41 @@ TRAIN_STATE_BACKUP_PATH = os.path.join(MODEL_DIR, "train_state_backup.json")
 DEFAULT_LOG_CSV = os.path.join(BASE_DIR, "logs", "train_log.csv")
 DEFAULT_LOG_CUDA_CSV = os.path.join(BASE_DIR, "logs", "train_log_cuda.csv")
 DEFAULT_LOG_CPU_CSV = os.path.join(BASE_DIR, "logs", "train_log_cpu.csv")
+
+
+def size_tag(board_size: int) -> str:
+    return f"{board_size}x{board_size}"
+
+
+def paths_for_size(board_size: int) -> dict:
+    """Model/checkpoint/sgf/data/state paths for a board size.
+
+    19x19 keeps the historical (un-namespaced) locations for backward
+    compatibility with existing checkpoints and the committed
+    models/latest.keras; other sizes live under a `{size}x{size}` subfolder so
+    they never clobber each other.
+    """
+    if board_size == DEFAULT_BOARD_SIZE:
+        return {
+            "model_dir": MODEL_DIR,
+            "model_path": MODEL_PATH,
+            "ckpt_dir": CKPT_DIR,
+            "sgf_dir": SGF_DIR,
+            "data_dir": DEFAULT_DATA_DIR,
+            "train_state_path": TRAIN_STATE_PATH,
+            "train_state_backup_path": TRAIN_STATE_BACKUP_PATH,
+        }
+    tag = size_tag(board_size)
+    model_dir = os.path.join(MODEL_DIR, tag)
+    return {
+        "model_dir": model_dir,
+        "model_path": os.path.join(model_dir, "latest.keras"),
+        "ckpt_dir": os.path.join(CKPT_DIR, tag),
+        "sgf_dir": os.path.join(SGF_DIR, tag),
+        "data_dir": os.path.join(DEFAULT_DATA_DIR, tag),
+        "train_state_path": os.path.join(BASE_DIR, f"train_state_{tag}.json"),
+        "train_state_backup_path": os.path.join(model_dir, "train_state_backup.json"),
+    }
 
 
 def _sgf_coord(x: int, y: int) -> str:
@@ -313,7 +349,7 @@ def sample_action(model: tf.keras.Model, board: GoBoard, mask: Optional[np.ndarr
     value = float(value.numpy()[0][0])
     _NN_TIME_ACC[0] += time.perf_counter() - _t0
     probs = _masked_softmax(logits, mask)
-    return int(np.random.choice(len(probs), p=probs)), value
+    return safe_choice(probs), value
 
 
 def _render_progress_bar(current: int, total: int, width: int = 20) -> str:
@@ -398,8 +434,17 @@ def play_episode(
             total = np.sum(probs)
             if total > 0:
                 probs = probs / total
+            else:
+                # All MCTS weight fell on now-masked actions (e.g. the search
+                # concentrated on pass while pass is still disallowed). Fall back
+                # to a uniform distribution over the legal moves so sampling
+                # stays on-support instead of picking an illegal move. If nothing
+                # is legal, allow pass.
+                if np.sum(mask) <= 0:
+                    mask[move_to_index(PASS_MOVE, board.size)] = 1.0
+                probs = mask / np.sum(mask)
             maybe_policy = probs
-            action_idx = int(np.random.choice(len(probs), p=probs))
+            action_idx = safe_choice(probs)
         else:
             mask = legal_moves_mask(board)
             if not pass_allowed:
@@ -497,7 +542,7 @@ def train(
     resign_threshold: float = DEFAULT_RESIGN_THRESHOLD,
     resign_start: int = DEFAULT_RESIGN_START,
     resign_score_check_moves: int = DEFAULT_RESIGN_SCORE_CHECK_MOVES,
-    data_dir: str = DEFAULT_DATA_DIR,
+    data_dir: Optional[str] = None,
     selfplay_only: bool = False,
     train_only: bool = False,
     save_selfplay: bool = False,
@@ -509,17 +554,28 @@ def train(
     eval_every: int = 0,
     eval_games: int = DEFAULT_EVAL_GAMES,
 ):
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    # Per-board-size paths so different sizes don't overwrite each other.
+    paths = paths_for_size(board_size)
+    model_dir = paths["model_dir"]
+    model_path = paths["model_path"]
+    ckpt_dir = paths["ckpt_dir"]
+    sgf_dir = paths["sgf_dir"]
+    train_state_path = paths["train_state_path"]
+    train_state_backup_path = paths["train_state_backup_path"]
+    if data_dir is None:
+        data_dir = paths["data_dir"]
 
-    train_state = _load_train_state(TRAIN_STATE_PATH)
+    os.makedirs(model_dir, exist_ok=True)
 
-    model = load_or_create_model(MODEL_PATH, board_size, channels, blocks)
+    train_state = _load_train_state(train_state_path)
+
+    model = load_or_create_model(model_path, board_size, channels, blocks)
     optimizer = tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE)
     # Build variables before restoring optimizer state.
     _ = model(tf.zeros((1, board_size, board_size, 3)))
     infer_fn = _timed_infer(make_infer_fn(model))
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    manager = tf.train.CheckpointManager(checkpoint, CKPT_DIR, max_to_keep=3)
+    manager = tf.train.CheckpointManager(checkpoint, ckpt_dir, max_to_keep=3)
     if manager.latest_checkpoint:
         # The checkpoint may have been written for a different board size or
         # network shape (e.g. switching --board-size / --channels / --blocks).
@@ -684,14 +740,14 @@ def train(
                 value_loss = tf.constant(0.0)
 
             if not selfplay_only and episode % save_every == 0:
-                model.save(MODEL_PATH)
-                checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{episode:06d}.keras")
+                model.save(model_path)
+                checkpoint_path = os.path.join(model_dir, f"checkpoint_{episode:06d}.keras")
                 model.save(checkpoint_path)
                 manager.save(checkpoint_number=episode)
                 if not train_only:
-                    _save_sgf(moves, score_diff, episode, board_size, komi, SGF_DIR)
-                _save_train_state(TRAIN_STATE_PATH, train_state)
-                _backup_train_state(TRAIN_STATE_PATH, TRAIN_STATE_BACKUP_PATH)
+                    _save_sgf(moves, score_diff, episode, board_size, komi, sgf_dir)
+                _save_train_state(train_state_path, train_state)
+                _backup_train_state(train_state_path, train_state_backup_path)
 
             if (
                 eval_every > 0
@@ -756,12 +812,12 @@ def train(
         if csv_file is not None:
             csv_file.close()
         if last_episode > 0:
-            model.save(MODEL_PATH)
-            checkpoint_path = os.path.join(MODEL_DIR, f"checkpoint_{last_episode:06d}.keras")
+            model.save(model_path)
+            checkpoint_path = os.path.join(model_dir, f"checkpoint_{last_episode:06d}.keras")
             model.save(checkpoint_path)
             manager.save(checkpoint_number=last_episode)
-            _save_train_state(TRAIN_STATE_PATH, train_state)
-            _backup_train_state(TRAIN_STATE_PATH, TRAIN_STATE_BACKUP_PATH)
+            _save_train_state(train_state_path, train_state)
+            _backup_train_state(train_state_path, train_state_backup_path)
 
 
 if __name__ == "__main__":
@@ -836,7 +892,12 @@ if __name__ == "__main__":
         default=DEFAULT_RESIGN_SCORE_CHECK_MOVES,
         help="skip resign check for last N moves when area score favors current player",
     )
-    parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR, help="self-play data directory")
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="self-play data directory (default: per-board-size under ./data)",
+    )
     parser.add_argument("--selfplay-only", action="store_true", help="generate self-play data only")
     parser.add_argument("--train-only", action="store_true", help="train from data directory only")
     parser.add_argument("--save-selfplay", action="store_true", help="save self-play data while training")

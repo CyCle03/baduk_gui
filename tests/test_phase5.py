@@ -7,6 +7,7 @@ from engine import GoBoard, IllegalMove, PASS_MOVE
 from features import (
     NUM_SYMMETRIES,
     move_to_index,
+    safe_choice,
     transform_actions,
     transform_policies,
     transform_states,
@@ -92,6 +93,25 @@ class TestPositionalSuperko(unittest.TestCase):
             legal = board.legal_moves()
             mv = rng.choice(legal)
             board.play(mv[0], mv[1])  # must not raise (chosen from legal_moves)
+
+
+class TestSafeChoice(unittest.TestCase):
+    def test_handles_drift_and_degenerate(self):
+        # Sum slightly off 1 (would break np.random.choice directly).
+        p = np.array([0.2, 0.2, 0.2, 0.2, 0.2000003], dtype=np.float32)
+        for _ in range(50):
+            self.assertIn(safe_choice(p), range(5))
+        # Tiny negative entry gets clipped.
+        p2 = np.array([0.5, -1e-9, 0.5], dtype=np.float64)
+        self.assertIn(safe_choice(p2), range(3))
+        # All-zero -> uniform fallback, never raises.
+        self.assertIn(safe_choice(np.zeros(4)), range(4))
+
+    def test_respects_support(self):
+        # Zero-probability entries are never selected.
+        p = np.array([0.0, 1.0, 0.0, 0.0])
+        for _ in range(20):
+            self.assertEqual(safe_choice(p), 1)
 
 
 class TestSymmetry(unittest.TestCase):

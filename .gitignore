@@ -10,3 +10,4 @@ sgf/
 data/
 *.npz
 logs/
+train_state_*.json

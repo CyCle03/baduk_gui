@@ -108,6 +108,24 @@ def transform_actions(actions: np.ndarray, t: int, board_size: int) -> np.ndarra
     return out
 
 
+def safe_choice(probs) -> int:
+    """Sample an index from `probs`, robust to floating-point drift.
+
+    np.random.choice rejects probability vectors that don't sum to exactly 1 (or
+    that contain tiny negatives from earlier arithmetic). This clips negatives,
+    renormalizes in float64, and falls back to uniform on a degenerate vector, so
+    self-play sampling never crashes mid-episode.
+    """
+    p = np.asarray(probs, dtype=np.float64)
+    p = np.where(p > 0, p, 0.0)
+    total = p.sum()
+    if total > 0 and np.isfinite(total):
+        p = p / total
+    else:
+        p = np.full(p.size, 1.0 / p.size)
+    return int(np.random.choice(p.size, p=p))
+
+
 def masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Softmax restricted to legal actions (no temperature)."""
     masked = np.where(mask > 0, logits, -1e9)
