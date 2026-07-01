@@ -1,4 +1,5 @@
 import csv
+import json
 import math
 import random
 import os
@@ -517,6 +518,14 @@ def _model_path_for_size(base_dir: str, board_size: int) -> str:
     return os.path.join(base_dir, "models", f"{board_size}x{board_size}", "latest.pt")
 
 
+def _train_state_path_for_size(base_dir: str, board_size: int) -> str:
+    # Cumulative-episode counter lives per board size, mirroring
+    # train_selfplay.paths_for_size: 19x19 keeps the un-namespaced filename.
+    if board_size == 19:
+        return os.path.join(base_dir, "train_state.json")
+    return os.path.join(base_dir, f"train_state_{board_size}x{board_size}.json")
+
+
 class MainWindow(QWidget):
     def __init__(self, board_size: int = 19):
         super().__init__()
@@ -528,6 +537,7 @@ class MainWindow(QWidget):
         self.board = GoBoard(board_size)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.model_path = _model_path_for_size(base_dir, board_size)
+        self.train_state_path = _train_state_path_for_size(base_dir, board_size)
         self.train_script = os.path.join(base_dir, "train_selfplay.py")
         self.ai = self._make_ai()
         self.ai_vs_ai = False
@@ -656,16 +666,33 @@ class MainWindow(QWidget):
         if PolicyAI is not None and os.path.exists(self.model_path):
             return PolicyAI(self.model_path, board_size=self.board.size)
         return RandomAI(pass_prob=0.03)
+    def _read_total_episodes(self) -> Optional[int]:
+        """Cumulative episodes this board size's model has trained on.
+
+        Read live from the per-size train_state file so the count reflects the
+        background trainer's latest checkpoint. Returns None if unavailable.
+        """
+        try:
+            with open(self.train_state_path, encoding="utf-8") as f:
+                data = json.load(f)
+            value = data.get("total_episodes")
+            return int(value) if value is not None else None
+        except (OSError, ValueError, TypeError):
+            return None
+
     def _update_status(self):
         to_play = "흑(사람)" if self.board.to_play == BLACK else "백(AI)"
         train_state = "ON" if self.train_running else "OFF"
         mcts_state = f"ON ({self.mcts_simulations})" if self.use_mcts else "OFF"
+        episodes = self._read_total_episodes()
+        episodes_text = str(episodes) if episodes is not None else "0"
         sgf_state = ""
         if self.sgf_mode:
             sgf_state = f"\nSGF: {self.sgf_index}/{len(self.sgf_moves)}"
         self.status.setText(
             f"차례: {to_play}\n"
             f"진행 수: {self.board.move_count()}\n"
+            f"학습 판수: {episodes_text}\n"
             f"학습: {train_state}\n"
             f"학습 상태: {self.last_train_status}\n"
             f"MCTS: {mcts_state}\n"
@@ -1024,7 +1051,7 @@ class MainWindow(QWidget):
             return
 
         if PolicyAI is None:
-            QMessageBox.information(self, "학습 불가", "TensorFlow를 사용할 수 없습니다.")
+            QMessageBox.information(self, "학습 불가", "PyTorch를 사용할 수 없습니다.")
             return
         if not os.path.exists(self.train_script):
             QMessageBox.information(self, "학습 스크립트 없음", "train_selfplay.py를 찾을 수 없습니다.")
