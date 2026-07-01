@@ -1,8 +1,15 @@
 .venv/
 __pycache__/
 *.pyc
-models/
+
+# Models: keep the per-board-size "latest.pt" snapshots in git (so a trained
+# result can be committed) but ignore everything else under models/ (rotating
+# checkpoint_*.pt binaries would otherwise bloat the repo).
+models/**
+!models/**/
 !models/latest.pt
+!models/**/latest.pt
+
 checkpoints/
 sgf/
 *.h5
@@ -10,4 +17,6 @@ sgf/
 data/
 *.npz
 logs/
-train_state_*.json
+
+# train_state*.json (cumulative episode counters) are tracked so "how many
+# episodes trained" is recorded alongside the committed model.
