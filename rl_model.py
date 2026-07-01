@@ -109,6 +109,7 @@ def forward_numpy(model: PolicyValueNet, states: np.ndarray) -> Tuple[np.ndarray
     are duplicated across the codebase.
     """
     device = next(model.parameters()).device
+    model.eval()
     with torch.no_grad():
         x = torch.as_tensor(np.asarray(states), dtype=torch.float32, device=device)
         logits, values = model(x)
@@ -126,6 +127,7 @@ def make_infer_fn(model: PolicyValueNet):
     device = next(model.parameters()).device
 
     def infer(states: np.ndarray):
+        model.eval()
         with torch.no_grad():
             x = torch.as_tensor(np.asarray(states), dtype=torch.float32, device=device)
             logits, values = model(x)
@@ -157,7 +159,10 @@ def load_or_create_model(
 ) -> PolicyValueNet:
     if os.path.exists(path):
         try:
-            ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
+            # weights_only=True: the payload is only tensors + a metadata dict of
+            # primitives, so we avoid arbitrary-code execution when loading a
+            # model file supplied on the command line (e.g. eval.py --p1 <path>).
+            ckpt = torch.load(path, map_location=DEVICE, weights_only=True)
         except Exception as exc:
             print(f"Failed to load model at {path}: {exc}. Creating a new model.")
             return build_policy_model(board_size, channels, blocks)

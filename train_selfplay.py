@@ -172,10 +172,17 @@ def _restore_training_checkpoint(ckpt_dir, model, optimizer):
         return
     path = os.path.join(ckpt_dir, ckpts[-1])
     try:
-        ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
+        ckpt = torch.load(path, map_location=DEVICE, weights_only=True)
         arch = ckpt.get("arch", {})
-        if arch.get("board_size", model.board_size) != model.board_size:
-            raise ValueError("board size mismatch")
+        # Validate the FULL architecture before load_state_dict: a size/shape
+        # mismatch would otherwise copy some params before raising, leaving the
+        # model half-overwritten instead of the clean freshly-built one.
+        if (
+            arch.get("board_size", model.board_size) != model.board_size
+            or arch.get("channels", model.channels) != model.channels
+            or arch.get("blocks", model.blocks) != model.blocks
+        ):
+            raise ValueError("architecture mismatch")
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
     except Exception as exc:
