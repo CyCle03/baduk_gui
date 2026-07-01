@@ -267,7 +267,11 @@ def _save_episode_data(
 ) -> str:
     os.makedirs(data_dir, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(data_dir, f"episode_{episode:06d}_{timestamp}.npz")
+    # PID + sub-second token keeps filenames unique when several self-play
+    # workers write to the same data dir in parallel (second-resolution
+    # timestamps alone would collide and overwrite each other's episodes).
+    unique = f"{os.getpid()}_{time.time_ns() % 1_000_000:06d}"
+    path = os.path.join(data_dir, f"episode_{episode:06d}_{timestamp}_{unique}.npz")
     if policy_targets is not None:
         np.savez_compressed(
             path,
@@ -302,7 +306,9 @@ def _load_data_dir(
         path = os.path.join(data_dir, name)
         try:
             data = np.load(path)
-        except OSError:
+        except Exception:
+            # Skip truncated/corrupt .npz (e.g. a parallel worker killed
+            # mid-write) instead of crashing the trainer.
             continue
         states = data["states"]
         actions = data["actions"]
@@ -887,7 +893,10 @@ def train(
     finally:
         if csv_file is not None:
             csv_file.close()
-        if last_episode > 0:
+        # selfplay-only workers are pure data producers: they must never write
+        # the model / checkpoints / train_state, or a parallel worker would
+        # clobber the trainer's latest.pt with its own stale (unchanged) weights.
+        if last_episode > 0 and not selfplay_only:
             save_model(model, model_path)
             checkpoint_path = os.path.join(model_dir, f"checkpoint_{last_episode:06d}.pt")
             save_model(model, checkpoint_path)

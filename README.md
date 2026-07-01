@@ -161,6 +161,26 @@ python train_selfplay.py --board-size 19 --init-from models/9x9/latest.pt --mcts
 `--init-from` is ignored once a model already exists for the target size (a
 resume checkpoint always takes precedence).
 
+## Parallel self-play
+
+Self-play (MCTS on CPU) is the bottleneck, and a single trainer only uses one
+core. `parallel_train.py` runs several self-play workers plus one trainer to use
+the whole machine (an actor/learner split built on `--selfplay-only` /
+`--train-only`):
+
+```bash
+python parallel_train.py --board-size 9 --workers 8
+# warm-start a bigger board from a smaller one:
+python parallel_train.py --board-size 19 --workers 8 --init-from models/9x9/latest.pt
+```
+
+Workers restart in short batches so they pick up the trainer's newest
+`latest.pt`, and default to CPU inference so the GPU is reserved for the trainer
+(`--gpu-workers` to share it). Per-worker logs go to
+`data/parallel_<size>/worker_logs/`; the trainer's loss stays on the console.
+Stop with Ctrl+C. Use `--workers`, `--mcts-sims`, `--worker-episodes`, and
+`--keep-data` to tune throughput and disk use.
+
 ## Architecture notes
 
 - `features.py` — framework-free board encoding / move indexing (vectorized).

@@ -146,10 +146,16 @@ def make_infer_fn(model: PolicyValueNet):
 
 
 def save_model(model: PolicyValueNet, path: str) -> None:
-    """Persist weights plus the architecture metadata needed to rebuild them."""
+    """Persist weights + architecture metadata, atomically.
+
+    Writes to a temp file then os.replace()s it into place so a reader (or a
+    killed process, e.g. a parallel-training worker being shut down) never sees a
+    half-written model file.
+    """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
     torch.save(
         {
             "model": model.state_dict(),
@@ -159,8 +165,9 @@ def save_model(model: PolicyValueNet, path: str) -> None:
                 "blocks": model.blocks,
             },
         },
-        path,
+        tmp,
     )
+    os.replace(tmp, path)
 
 
 def load_or_create_model(
