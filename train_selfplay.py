@@ -174,12 +174,12 @@ def _restore_training_checkpoint(ckpt_dir, model, optimizer):
     try:
         ckpt = torch.load(path, map_location=DEVICE, weights_only=True)
         arch = ckpt.get("arch", {})
-        # Validate the FULL architecture before load_state_dict: a size/shape
-        # mismatch would otherwise copy some params before raising, leaving the
-        # model half-overwritten instead of the clean freshly-built one.
+        # The net is fully convolutional, so board_size doesn't affect weights;
+        # only channels/blocks must match. Validate before load_state_dict so a
+        # shape mismatch doesn't half-overwrite the freshly-built model before
+        # raising.
         if (
-            arch.get("board_size", model.board_size) != model.board_size
-            or arch.get("channels", model.channels) != model.channels
+            arch.get("channels", model.channels) != model.channels
             or arch.get("blocks", model.blocks) != model.blocks
         ):
             raise ValueError("architecture mismatch")
@@ -188,7 +188,7 @@ def _restore_training_checkpoint(ckpt_dir, model, optimizer):
     except Exception as exc:
         print(
             f"Could not restore checkpoint {path} "
-            f"(likely a board-size/architecture change): {exc}. "
+            f"(likely a channels/blocks architecture change): {exc}. "
             "Starting from a fresh model."
         )
 
@@ -667,6 +667,7 @@ def train(
     blocks: int = DEFAULT_BLOCKS,
     eval_every: int = 0,
     eval_games: int = DEFAULT_EVAL_GAMES,
+    init_from: Optional[str] = None,
 ):
     # Per-board-size paths so different sizes don't overwrite each other.
     paths = paths_for_size(board_size)
@@ -683,7 +684,15 @@ def train(
 
     train_state = _load_train_state(train_state_path)
 
-    model = load_or_create_model(model_path, board_size, channels, blocks)
+    # Warm-start: if no model exists yet for this board size and --init-from
+    # points at another model (e.g. a 9x9 net), load its weights instead of
+    # starting fresh. The fully-convolutional net makes these weights board-size
+    # independent. An existing checkpoint below still takes precedence (resume).
+    if not os.path.exists(model_path) and init_from and os.path.exists(init_from):
+        print(f"Warm-starting from {init_from}")
+        model = load_or_create_model(init_from, board_size, channels, blocks)
+    else:
+        model = load_or_create_model(model_path, board_size, channels, blocks)
     optimizer = torch.optim.Adam(model.parameters(), lr=DEFAULT_LEARNING_RATE)
     infer_fn = _timed_infer(make_infer_fn(model))
     # Restore model+optimizer from the latest checkpoint. A checkpoint written
@@ -971,6 +980,13 @@ if __name__ == "__main__":
     parser.add_argument("--max-data-files", type=int, default=0, help="max data files to load")
     parser.add_argument("--log-csv", type=str, default=DEFAULT_LOG_CSV, help="CSV log path (empty to disable)")
     parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="warm-start weights from another model (.pt), e.g. a 9x9 net to "
+        "seed 19x19 training. Ignored if a model already exists for this size.",
+    )
+    parser.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1026,6 +1042,7 @@ if __name__ == "__main__":
             max_data_files=args.max_data_files if args.max_data_files > 0 else None,
             show_progress=args.progress,
             log_csv=log_csv,
+            init_from=args.init_from,
         )
 
     if args.profile:
