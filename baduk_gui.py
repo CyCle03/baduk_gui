@@ -80,6 +80,17 @@ GUI_RESIGN_THRESHOLD = 0.99
 GUI_RESIGN_START = 250
 GUI_LOG_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "gui_log.csv")
 
+# The move-count thresholds above (pass_min_moves, pass_start, resign_start) are
+# tuned for a 19x19 board. A small board fills up in far fewer moves, so a fixed
+# 150/300/250 would never be reached there -- the AI would never auto-pass or
+# resign and games would grind until the board is full. Scale them by board area.
+GUI_REF_BOARD_AREA = 19 * 19
+
+
+def _scale_threshold(ref_value: int, board_size: int) -> int:
+    """Scale a 19x19-tuned move-count threshold to `board_size` by board area."""
+    return max(1, round(ref_value * board_size * board_size / GUI_REF_BOARD_AREA))
+
 # ----------------------------
 # GUI (PyQt6)
 # ----------------------------
@@ -545,6 +556,11 @@ class MainWindow(QWidget):
         )
 
         self.board = GoBoard(board_size)
+        # Board-size-scaled move thresholds (see _scale_threshold): keeps AI
+        # pass/resign behavior sensible on small boards, unchanged on 19x19.
+        self.pass_min_moves = _scale_threshold(GUI_PASS_MIN_MOVES, board_size)
+        self.pass_start = _scale_threshold(GUI_PASS_START, board_size)
+        self.resign_start = _scale_threshold(GUI_RESIGN_START, board_size)
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.model_path = _model_path_for_size(base_dir, board_size)
         self.train_state_path = _train_state_path_for_size(base_dir, board_size)
@@ -763,14 +779,14 @@ class MainWindow(QWidget):
     def _should_resign_selfplay(self, value: float) -> bool:
         if not self.ai_vs_ai:
             return False
-        if self.board.move_count() < GUI_RESIGN_START:
+        if self.board.move_count() < self.resign_start:
             return False
         return value <= -GUI_RESIGN_THRESHOLD
 
     def _should_pass_selfplay(self, value: float, pass_allowed: bool) -> bool:
         if not self.ai_vs_ai or not pass_allowed:
             return False
-        if self.board.move_count() < GUI_PASS_START:
+        if self.board.move_count() < self.pass_start:
             return False
         if len(self._recent_values) < GUI_VALUE_WINDOW:
             return False
@@ -924,7 +940,7 @@ class MainWindow(QWidget):
             return
         if self.board.to_play == BLACK and not self.ai_vs_ai:
             return
-        pass_allowed = not self.ai_vs_ai or self.board.move_count() >= GUI_PASS_MIN_MOVES
+        pass_allowed = not self.ai_vs_ai or self.board.move_count() >= self.pass_min_moves
         mv = None
         value = None
         if self.use_mcts and self._ensure_policy_ai():
