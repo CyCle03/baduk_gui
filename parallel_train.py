@@ -174,7 +174,10 @@ def main():
 
     worker_env = os.environ.copy()
     if not args.gpu_workers:
-        worker_env["CUDA_VISIBLE_DEVICES"] = ""
+        # "-1" reliably hides the GPU (empty string is treated as "all visible"
+        # by some torch builds), so workers run on CPU and load the trainer's
+        # GPU-saved latest.pt via map_location="cpu".
+        worker_env["CUDA_VISIBLE_DEVICES"] = "-1"
     # Each worker plays one game at a time, so pin it to a single BLAS/torch
     # thread. Otherwise every worker spawns cpu_count intra-op threads, which
     # oversubscribes the cores and multiplies committed memory across N workers

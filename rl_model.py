@@ -20,7 +20,13 @@ from features import (
 )
 
 # One device for the whole process: models and input tensors live here.
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Require device_count() > 0, not just is_available(): with CUDA_VISIBLE_DEVICES=""
+# (used to pin CPU-only self-play workers) is_available() can report True while
+# device_count() is 0, which would then make torch.load(map_location="cuda") fail
+# to read a GPU-saved model. Checking the count keeps DEVICE honest.
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu"
+)
 
 
 class PolicyValueNet(nn.Module):
