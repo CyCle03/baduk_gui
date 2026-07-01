@@ -20,17 +20,28 @@ from features import (
 )
 
 # One device for the whole process: models and input tensors live here.
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Require device_count() > 0, not just is_available(): with CUDA_VISIBLE_DEVICES=""
+# (used to pin CPU-only self-play workers) is_available() can report True while
+# device_count() is 0, which would then make torch.load(map_location="cuda") fail
+# to read a GPU-saved model. Checking the count keeps DEVICE honest.
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu"
+)
 
 
 class PolicyValueNet(nn.Module):
-    """ResNet policy+value head. Mirrors the previous Keras architecture.
+    """Fully-convolutional ResNet policy+value net.
 
     Input is NHWC ``(N, size, size, 3)`` (the layout produced by
     ``features.encode_board``); it is permuted to NCHW inside ``forward`` so the
     feature/encoding code stays framework-agnostic. Returns ``(logits, value)``
-    with logits ``(N, action_size)`` and value ``(N, 1)`` to match the output
-    contract the rest of the codebase expects.
+    with logits ``(N, size*size + 1)`` and value ``(N, 1)``.
+
+    No layer depends on the board size: board-point logits come from a 1x1 conv
+    (one logit per point), the pass logit and the value come from a
+    global-average-pooled trunk feature. So one set of weights runs on any board
+    size, and a model trained on 9x9 can warm-start 19x19. ``board_size`` is kept
+    only as metadata (the size the net was primarily trained on).
     """
 
     def __init__(self, board_size: int, channels: int = 64, blocks: int = 4):
@@ -38,7 +49,6 @@ class PolicyValueNet(nn.Module):
         self.board_size = board_size
         self.channels = channels
         self.blocks = blocks
-        self.action_size = action_size(board_size)
 
         self.stem = nn.Conv2d(3, channels, 3, padding=1)
         self.res_blocks = nn.ModuleList(
@@ -51,13 +61,14 @@ class PolicyValueNet(nn.Module):
             for _ in range(blocks)
         )
 
-        # Policy head
-        self.policy_conv = nn.Conv2d(channels, 2, 1)
-        self.policy_fc = nn.Linear(2 * board_size * board_size, self.action_size)
+        # Policy head (size-independent): per-point logits via 1x1 convs, plus a
+        # single pass logit from the global-pooled trunk feature.
+        self.policy_conv = nn.Conv2d(channels, 32, 1)
+        self.policy_point = nn.Conv2d(32, 1, 1)
+        self.policy_pass = nn.Linear(channels, 1)
 
-        # Value head
-        self.value_conv = nn.Conv2d(channels, 1, 1)
-        self.value_fc1 = nn.Linear(board_size * board_size, 64)
+        # Value head (size-independent): global average pool -> MLP.
+        self.value_fc1 = nn.Linear(channels, 64)
         self.value_fc2 = nn.Linear(64, 1)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -70,13 +81,17 @@ class PolicyValueNet(nn.Module):
             t = conv2(t)
             x = F.relu(t + skip)
 
-        p = F.relu(self.policy_conv(x))
-        p = torch.flatten(p, 1)
-        logits = self.policy_fc(p)
+        pooled = x.mean(dim=(2, 3))  # (N, channels), global average pool
 
-        v = F.relu(self.value_conv(x))
-        v = torch.flatten(v, 1)
-        v = F.relu(self.value_fc1(v))
+        # Policy: board-point logits (flattened row-major == y*W + x, matching
+        # features.move_to_index) followed by the pass logit at the last index.
+        p = F.relu(self.policy_conv(x))
+        board_logits = torch.flatten(self.policy_point(p), 1)  # (N, H*W)
+        pass_logit = self.policy_pass(pooled)                  # (N, 1)
+        logits = torch.cat([board_logits, pass_logit], dim=1)  # (N, H*W + 1)
+
+        # Value
+        v = F.relu(self.value_fc1(pooled))
         value = torch.tanh(self.value_fc2(v))
         return logits, value
 
@@ -137,10 +152,16 @@ def make_infer_fn(model: PolicyValueNet):
 
 
 def save_model(model: PolicyValueNet, path: str) -> None:
-    """Persist weights plus the architecture metadata needed to rebuild them."""
+    """Persist weights + architecture metadata, atomically.
+
+    Writes to a temp file then os.replace()s it into place so a reader (or a
+    killed process, e.g. a parallel-training worker being shut down) never sees a
+    half-written model file.
+    """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
     torch.save(
         {
             "model": model.state_dict(),
@@ -150,8 +171,9 @@ def save_model(model: PolicyValueNet, path: str) -> None:
                 "blocks": model.blocks,
             },
         },
-        path,
+        tmp,
     )
+    os.replace(tmp, path)
 
 
 def load_or_create_model(
@@ -174,11 +196,10 @@ def load_or_create_model(
             arch = {}
             state_dict = ckpt
 
-        m_board = arch.get("board_size", board_size)
-        if m_board != board_size:
-            print("Model board size mismatch; creating new policy+value model.")
-            return build_policy_model(board_size, channels, blocks)
-
+        # The net is fully convolutional, so weights are board-size independent:
+        # a checkpoint trained on any size loads here (only channels/blocks must
+        # match, which load_state_dict enforces via shapes). This is what lets a
+        # 9x9 model warm-start 19x19. `board_size` is carried as metadata only.
         model = build_policy_model(
             board_size, arch.get("channels", channels), arch.get("blocks", blocks)
         )

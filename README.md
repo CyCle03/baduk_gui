@@ -6,7 +6,7 @@ Baduk (Go) GUI with self-play reinforcement learning.
 
 - Python 3.10+
 - PyQt6
-- TensorFlow (for training/policy model)
+- PyTorch (for training/policy model)
 
 ## Setup
 
@@ -98,7 +98,7 @@ Models are saved to:
 - `models/latest.pt` (latest)
 - `models/checkpoint_XXXXXX.pt` (every N episodes)
 Optimizer checkpoints are saved to:
-- `checkpoints/` (TensorFlow checkpoint, auto-resume)
+- `checkpoints/` (PyTorch model+optimizer checkpoint, auto-resume)
 
 Logs include per-episode time, total time, average time, and recent 10-episode average.
 Log fields:
@@ -148,9 +148,51 @@ python baduk_gui.py --board-size 9
 
 Star points (hoshi) adapt to the board size automatically.
 
+The policy/value net is fully convolutional, so its weights are board-size
+independent: a model trained on a small board can warm-start a larger one with
+`--init-from` (much faster than starting 19x19 from scratch):
+
+```bash
+# train 9x9 first, then seed 19x19 from it
+python train_selfplay.py --board-size 9 --episodes 500
+python train_selfplay.py --board-size 19 --init-from models/9x9/latest.pt --mcts-sims 100
+```
+
+`--init-from` is ignored once a model already exists for the target size (a
+resume checkpoint always takes precedence).
+
+## Parallel self-play
+
+Self-play (MCTS on CPU) is the bottleneck, and a single trainer only uses one
+core. `parallel_train.py` runs several self-play workers plus one trainer to use
+the whole machine (an actor/learner split built on `--selfplay-only` /
+`--train-only`):
+
+```bash
+python parallel_train.py --board-size 9 --workers 8
+# warm-start a bigger board from a smaller one:
+python parallel_train.py --board-size 19 --workers 8 --init-from models/9x9/latest.pt
+```
+
+Workers restart in short batches so they pick up the trainer's newest
+`latest.pt`, and default to CPU inference so the GPU is reserved for the trainer
+(`--gpu-workers` to share it). Each worker is pinned to a single BLAS thread, so
+`--workers N` maps cleanly onto N cores. Per-worker logs go to
+`data/parallel_<size>/worker_logs/`; the trainer's loss stays on the console.
+Stop with Ctrl+C. Use `--workers`, `--mcts-sims`, `--worker-episodes`, and
+`--keep-data` to tune throughput and disk use.
+
+Memory, not core count, is usually the limit on Windows (each worker is its own
+Python+torch process). `--workers` defaults conservatively; raise it if RAM
+allows. If workers die with `WinError 1455` ("paging file too small"), lower
+`--workers` or increase the Windows paging file.
+
 ## Architecture notes
 
-- `features.py` — TF-free board encoding / move indexing (vectorized).
+- `features.py` — framework-free board encoding / move indexing (vectorized).
+- `rl_model.py` — fully-convolutional ResNet: per-point policy logits from a 1x1
+  conv, plus a pass logit and the value from a global-average-pooled trunk, so
+  one set of weights runs on any board size.
 - `mcts.py` — the single MCTS implementation shared by self-play and the GUI;
   inference is injected as a function so the GPU model and test stubs share code.
 - `engine.py` — board logic with incremental Zobrist hashing and a light
@@ -158,7 +200,8 @@ Star points (hoshi) adapt to the board size automatically.
 
 ## Notes
 
-- Training is CPU-only unless TensorFlow detects a GPU.
+- Training uses the GPU automatically when CUDA (`torch.cuda.is_available()`) is
+  detected, otherwise CPU.
 - Default max moves per game is 300.
 - Model files are ignored by git (`models/`, `*.keras`, `*.pt`).
 
@@ -172,7 +215,7 @@ Baduk (바둑) GUI와 자가대국 강화학습 예제입니다.
 
 - Python 3.10+
 - PyQt6
-- TensorFlow (학습/정책 모델용)
+- PyTorch (학습/정책 모델용)
 
 ### 설치
 
@@ -239,7 +282,7 @@ GUI 계가 추정은 면적 계산에 간단한 사석 휴리스틱을 적용합
 - `models/latest.pt` (최신)
 - `models/checkpoint_XXXXXX.pt` (N 에피소드마다)
 옵티마이저 체크포인트:
-- `checkpoints/` (TensorFlow 체크포인트, 재시작 시 이어짐)
+- `checkpoints/` (PyTorch 체크포인트, 재시작 시 이어짐)
 
 로그에는 판당 시간, 누적 시간, 평균 시간, 최근 10판 평균 시간이 포함됩니다.
 로그 항목:

@@ -174,12 +174,12 @@ def _restore_training_checkpoint(ckpt_dir, model, optimizer):
     try:
         ckpt = torch.load(path, map_location=DEVICE, weights_only=True)
         arch = ckpt.get("arch", {})
-        # Validate the FULL architecture before load_state_dict: a size/shape
-        # mismatch would otherwise copy some params before raising, leaving the
-        # model half-overwritten instead of the clean freshly-built one.
+        # The net is fully convolutional, so board_size doesn't affect weights;
+        # only channels/blocks must match. Validate before load_state_dict so a
+        # shape mismatch doesn't half-overwrite the freshly-built model before
+        # raising.
         if (
-            arch.get("board_size", model.board_size) != model.board_size
-            or arch.get("channels", model.channels) != model.channels
+            arch.get("channels", model.channels) != model.channels
             or arch.get("blocks", model.blocks) != model.blocks
         ):
             raise ValueError("architecture mismatch")
@@ -188,7 +188,7 @@ def _restore_training_checkpoint(ckpt_dir, model, optimizer):
     except Exception as exc:
         print(
             f"Could not restore checkpoint {path} "
-            f"(likely a board-size/architecture change): {exc}. "
+            f"(likely a channels/blocks architecture change): {exc}. "
             "Starting from a fresh model."
         )
 
@@ -267,7 +267,11 @@ def _save_episode_data(
 ) -> str:
     os.makedirs(data_dir, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(data_dir, f"episode_{episode:06d}_{timestamp}.npz")
+    # PID + sub-second token keeps filenames unique when several self-play
+    # workers write to the same data dir in parallel (second-resolution
+    # timestamps alone would collide and overwrite each other's episodes).
+    unique = f"{os.getpid()}_{time.time_ns() % 1_000_000:06d}"
+    path = os.path.join(data_dir, f"episode_{episode:06d}_{timestamp}_{unique}.npz")
     if policy_targets is not None:
         np.savez_compressed(
             path,
@@ -302,7 +306,9 @@ def _load_data_dir(
         path = os.path.join(data_dir, name)
         try:
             data = np.load(path)
-        except OSError:
+        except Exception:
+            # Skip truncated/corrupt .npz (e.g. a parallel worker killed
+            # mid-write) instead of crashing the trainer.
             continue
         states = data["states"]
         actions = data["actions"]
@@ -667,6 +673,7 @@ def train(
     blocks: int = DEFAULT_BLOCKS,
     eval_every: int = 0,
     eval_games: int = DEFAULT_EVAL_GAMES,
+    init_from: Optional[str] = None,
 ):
     # Per-board-size paths so different sizes don't overwrite each other.
     paths = paths_for_size(board_size)
@@ -683,7 +690,15 @@ def train(
 
     train_state = _load_train_state(train_state_path)
 
-    model = load_or_create_model(model_path, board_size, channels, blocks)
+    # Warm-start: if no model exists yet for this board size and --init-from
+    # points at another model (e.g. a 9x9 net), load its weights instead of
+    # starting fresh. The fully-convolutional net makes these weights board-size
+    # independent. An existing checkpoint below still takes precedence (resume).
+    if not os.path.exists(model_path) and init_from and os.path.exists(init_from):
+        print(f"Warm-starting from {init_from}")
+        model = load_or_create_model(init_from, board_size, channels, blocks)
+    else:
+        model = load_or_create_model(model_path, board_size, channels, blocks)
     optimizer = torch.optim.Adam(model.parameters(), lr=DEFAULT_LEARNING_RATE)
     infer_fn = _timed_infer(make_infer_fn(model))
     # Restore model+optimizer from the latest checkpoint. A checkpoint written
@@ -878,7 +893,10 @@ def train(
     finally:
         if csv_file is not None:
             csv_file.close()
-        if last_episode > 0:
+        # selfplay-only workers are pure data producers: they must never write
+        # the model / checkpoints / train_state, or a parallel worker would
+        # clobber the trainer's latest.pt with its own stale (unchanged) weights.
+        if last_episode > 0 and not selfplay_only:
             save_model(model, model_path)
             checkpoint_path = os.path.join(model_dir, f"checkpoint_{last_episode:06d}.pt")
             save_model(model, checkpoint_path)
@@ -971,6 +989,13 @@ if __name__ == "__main__":
     parser.add_argument("--max-data-files", type=int, default=0, help="max data files to load")
     parser.add_argument("--log-csv", type=str, default=DEFAULT_LOG_CSV, help="CSV log path (empty to disable)")
     parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="warm-start weights from another model (.pt), e.g. a 9x9 net to "
+        "seed 19x19 training. Ignored if a model already exists for this size.",
+    )
+    parser.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1026,6 +1051,7 @@ if __name__ == "__main__":
             max_data_files=args.max_data_files if args.max_data_files > 0 else None,
             show_progress=args.progress,
             log_csv=log_csv,
+            init_from=args.init_from,
         )
 
     if args.profile:
