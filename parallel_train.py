@@ -185,6 +185,10 @@ def main():
     # worker also maps N workers cleanly onto N cores.
     for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         worker_env[_var] = "1"
+    # Unbuffered stdout so per-game lines reach the worker log file live; a child
+    # writing to a redirected file is block-buffered by default and would only
+    # flush in bursts (or on restart), making the log look frozen.
+    worker_env["PYTHONUNBUFFERED"] = "1"
 
     def worker_cmd():
         return [
